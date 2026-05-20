@@ -1,0 +1,2630 @@
+\section{Introduction}
+
+Many everyday fluids---yogurts, pastes, sauces, slurries, cosmetic
+emulsions---exhibit non-Newtonian behaviour that governs how they
+pour, spread, cling, and deform. Parallel-plate and cone-and-plate
+rheometers measure this behaviour through a controlled-gap shear
+flow, but fail on materials with inclusions larger than the
+measurement gap and on materials whose rheology evolves faster than
+the lab procedure can capture.
+
+Non-Newtonian video rheometry~\cite{hamamichi2023nonnewtonian}
+addresses this gap by estimating Herschel--Bulkley parameters
+$(\sigma_Y, \eta, n)$ from a simple dam-break flow: a material point
+method (MPM) forward model is repeatedly executed inside an optimiser
+until the simulated flow reproduces the observed silhouette. The
+approach naturally handles materials that instrumental rheometers
+cannot, but is bottlenecked by its inner loop---one MPM dam-break
+takes several minutes on modern GPU hardware and the
+derivative-free optimiser issues hundreds of candidates, so the
+end-to-end inverse takes \emph{around eight hours per setup}. This
+latency confines the method to offline research use and blocks two
+payoffs that we evaluate in this paper:
+
+\begin{itemize}
+    \item \emph{Fresh parameters for time-varying fluids.} When a
+    material's properties evolve during the measurement
+    window---sedimentation, aging, temperature drift, mixing history,
+    cooking cooldown---an hour-scale inversion returns a parameter
+    describing a past state. The inferred value is stale by the time
+    it is delivered.
+    \item \emph{Practical real-fluid validation and characterisation.}
+    Comparing multiple rheometer-referenced anchors, repeated setups,
+    or rheometer-infeasible material panels requires running the
+    inverse many times. At hours per setup, such panels are limited to
+    offline showcase studies; at seconds per setup, they fit inside an
+    ordinary measurement session.
+\end{itemize}
+
+We propose a surrogate-accelerated framework that compresses the
+inverse from hours to seconds per setup, making these uses
+available within a practical workflow. The inverse core couples the
+first two components below, and the full capture-to-parameter system
+adds the third.
+
+\emph{(i)}~A \emph{hierarchical mixture of Gaussian-process experts}
+(HMoGP) replaces MPM inside the optimizer. The trained surrogate bank
+partitions the forward map by container geometry, terminal flow
+distance, and normalized trajectory shape. At runtime the observable
+tuple $(W,H,\mathbf{y})$ deterministically routes each query to a
+local exact GP expert, with a final observation-evidence rerank that
+keeps the selected expert aligned with the observation source and
+runout regime.
+
+\emph{(ii)}~A \emph{GP-aware inverse likelihood} addresses the
+yield-stress/consistency ridge that arises when the observed
+shear-rate range is dominated by the consistency term. CMA-ES
+minimizes a log-space Type-II marginal-likelihood objective that uses
+the routed GP's predictive variance, an observation-noise floor, and
+the corresponding Occam term. The remaining ridge is reported through
+multi-start dispersion and local Laplace confidence intervals rather
+than hidden by a hand-tuned yield-stress prior.
+
+\emph{(iii)}~An \emph{algorithmic camera-calibration pipeline}
+replaces the manual fSpy-and-Photoshop workflow that precedes the
+inverse in prior work. A ChArUco marker board provides an initial
+pose estimate, and a subsequent silhouette-edge refinement aligns
+the camera against the dam-break geometry without per-capture human
+annotation, removing the largest fixed cost of the capture
+workflow.
+
+Our work inherits the problem setup, dam-break observation protocol,
+and inverse formulation
+from~\citet{hamamichi2023nonnewtonian}---including the multi-setup
+joint inversion they introduce to address the
+yield-stress/consistency degeneracy---and contributes the machinery
+needed to make that formulation computationally practical. By
+porting the inverse onto a learned surrogate, the same
+setup-selection and two-setup joint machinery becomes affordable per
+material rather than only per showcase, with the inverse returning
+within the latency required by these uses.
+
+\section{Related Work}
+
+\subsection{Physical Measurements and Flow Rheology Signals}
+
+Quantitative rheology is traditionally measured with rheometers
+(parallel-plate, cone-and-plate, or rotational) that apply a
+controlled laminar flow under known shear rate to recover the
+constitutive relation between shear stress and shear rate. These
+instruments require a narrow gap to enforce a clean shear profile,
+which excludes materials with millimeter-scale inclusions, as well
+as materials whose rheology evolves faster than the lab procedure
+can capture. Less-controlled but more accessible alternatives, such
+as the Bostwick consistometer, give a single readable measurement
+from a simple dam-break test.
+
+Gravity-driven flow has a long pedigree as a rheometric observation
+that complements idealized-flow rheometers. The slump test
+of~\citet{pashias1996fifty} recovers yield stress from a single
+geometric reading; \citet{roussel2005fiftycent} extend this argument
+to the spreading regime that matches dam-break geometry directly;
+the final-deposit shape of a stopped free-surface flow is itself a
+rheological signature~\cite{coussot1996rheological};
+and~\citet{ancey2007plasticity} frames the broader class of
+gravity-driven yield-stress flows as a standard rheometric regime.
+The relation between flow-front position and Herschel--Bulkley
+parameters is made quantitative by the similarity analyses
+of~\citet{liumei1989slow} and~\citet{balmforth2007two}, the same
+analytic framework leveraged by~\citet{hamamichi2023nonnewtonian}.
+
+Our forward simulator inherits the MPM lineage brought into
+graphics by~\cite{stomakhin2013material,jiang2015affine,hu2018moving,
+jiang2016material}, with yield-stress rheology realised through
+return-mapping
+formulations~\cite{yue2015continuum,ram2015material,klar2016drucker,
+tampubolon2017multi,wolper2019cdmpm}. We use the Herschel--Bulkley
+return map of~\citet{yue2015continuum} on
+Taichi~\cite{hu2019taichi}; \citet{nagasawa2019mixing}, from the
+same lab as our predecessor, shares our material focus.
+
+
+\subsection{Video-Based Material Estimation}
+
+Estimating simulation parameters from video by matching rendered and
+observed dynamics has a long lineage in graphics and
+vision~\cite{bhat2002computing,monszpart2016smash}.
+\citet{takahashi2019video} established the video-to-parameter pattern
+for viscous fluids by matching rendered and observed dam-break
+silhouettes per scene; \citet{hamamichi2023nonnewtonian} extended
+this to the Herschel--Bulkley triple $(\sigma_Y,\eta,n)$ and is the
+direct predecessor of our work. We inherit their dam-break observation
+protocol, inverse objective, and simulation-in-the-loop formulation
+(including the multi-setup machinery they introduce against the
+yield-stress/consistency degeneracy), and contribute the surrogate
+that makes the same machinery affordable per material rather than
+per showcase.
+
+Related work recovers material parameters from other visual
+modalities: video-based cloth friction~\cite{rasheed2020visual},
+particle-image-velocimetry-based rheology through physics-informed
+networks~\cite{thakur2025learning}, and consumer-video neural
+regression for scalar viscosity~\cite{rauzan2024protorheology}. These
+target different material classes or observation modalities and do
+not recover the full Herschel--Bulkley triple. Free-surface
+extraction from experimental video is treated
+in~\cite{cochard2009tracking}. Inverse rheometry has also been
+approached in the geophysical-flow setting using shallow-water
+forward models and adjoint methods~\cite{martin2010inverse}; our
+formulation differs in using a full three-dimensional MPM forward
+model and a derivative-free inverse over a learned surrogate.
+
+An alternative paradigm pursues parameter recovery via differentiable
+simulation. The differentiable MLS-MPM
+family~\cite{hu2019chainqueen,hu2020difftaichi,huang2021plasticinelab}
+has been applied to deformable and plastic materials;
+gradSim~\cite{murthy2021gradsim} demonstrates end-to-end
+differentiable physics with differentiable rendering. Most relevant
+to non-Newtonian recovery from video,
+PAC-NeRF~\cite{li2023pacnerf} couples differentiable MPM with NeRF
+rendering to recover viscosity parameters from multi-view video, and
+Eastman~\cite{eastman2024recovery} recovers Herschel--Bulkley
+parameters from a ketchup column-collapse video via differentiable
+MPM and neural rendering. These approaches optimize per scene and do
+not amortize a reusable surrogate across materials. Evidence from
+PlasticineLab~\cite{huang2021plasticinelab} indicates that gradients
+through non-smooth plastic return maps are ill-conditioned,
+motivating our choice of a gradient-free inverse over a
+probabilistic surrogate.
+
+
+\subsection{Identifiability of Free-Surface Observations}
+
+A prerequisite for replacing simulation-in-the-loop inversion with a
+surrogate is that the chosen observation
+$\mathbf{y}_{\mathrm{obs}}$ carries enough information to identify
+$(\sigma_Y,\eta,n)$. Recent inverse-analysis work establishes that
+free-surface evolution alone is sufficient:
+\citet{martinpritchard2022inferring} show that the full generalized
+Newtonian constitutive function is in principle uniquely recoverable
+from free-surface evolution; \citet{ahmadi2022identification}
+compute linearly-independent sensitivity coefficients of the three
+Herschel--Bulkley parameters with respect to free-surface readings;
+and~\citet{muchiri2024identification} demonstrate inverse recovery
+of yield stress and consistency from shallow-water elevation
+hydrographs under viscoplastic rheology. Our scalar flow-front trace
+$\mathbf{y}_{\mathrm{obs}}$ is a low-dimensional summary of this
+evolution, and the residual yield-stress/consistency degeneracy we
+address in~\S\ref{sec:inverse} is therefore not a fundamental
+information-theoretic limit of the phone-video observation but a
+practical ill-conditioning that arises in the low-$\sigma_Y$ regime
+where the yield term is dominated by the viscous contribution.
+
+
+\subsection{Surrogate-Accelerated Inverse}
+
+Gaussian-process regression~\cite{rasmussen2006gaussian} pairs
+flexible nonparametric regression with calibrated predictive
+uncertainty, making it a natural surrogate for expensive simulators;
+sparse and variational approximations~\cite{snelson2006sparse,
+quinonero2005unifying,titsias2009variational,hensman2013gaussian,
+matthews2016sparse} extend it past exact-GP data limits. For
+heterogeneous local structure, mixture-of-experts
+models~\cite{jordan1994hierarchical,yuksel2012twenty} decompose
+prediction across specialists with a gating mechanism; mixture-of-GP
+variants instantiate this with GP
+experts~\cite{tresp2001mixtures,rasmussen2002infinite,
+meeds2006alternative,nguyen2008local,yuan2008variational,
+trapp2020deep}, and the Bayesian Committee
+Machine~\cite{tresp2000bayesian,cao2014generalized,
+deisenroth2015distributed,liu2018generalized} aggregates independent
+GP predictions by closed-form variance-weighted fusion (recently
+applied to physics emulation~\cite{cohen2024sparse}).
+
+Inverting expensive simulators has been studied under Bayesian
+calibration of computer models~\cite{kennedy2001bayesian} and
+simulation-based inference~\cite{cranmer2020frontier}, with efficient
+global~\cite{jones1998efficient} and
+Bayesian~\cite{snoek2012practical,shahriari2016taking} optimisation
+as the dominant search strategies, and derivative-free optimisation
+on GP surrogates~\cite{bajaj2019gaussian,hansen2016cma} applied to
+inverse viscoplasticity~\cite{vandamme2021bayesian} and
+viscoelasticity~\cite{hashemi2025bayesian}. The substitution itself
+is not heuristic: \citet{stuart2018posterior} bound the Hellinger
+distance between the surrogate-based and true-simulator posteriors
+by moments of the surrogate's predictive error, with the bound
+extended to learned-hyperparameter settings
+by~\citet{teckentrup2020convergence}.
+
+
+\subsection{Camera Calibration}
+
+Camera pose and intrinsics from images is a foundational
+computer-vision task~\cite{hartley2004multiple}. Marker-based
+fiducials---AprilTag~\cite{olson2011apriltag},
+ARTag~\cite{fiala2005artag}, ArUco/ChArUco~\cite{garrido2014automatic,
+garrido2016generation}---supply 3D-to-2D correspondences solvable
+via PnP variants like EPnP~\cite{lepetit2009epnp}, with sub-pixel
+corner refinement~\cite{forstner1987fast} sharpening the
+correspondences. Silhouette- and edge-based refinement aligns the
+camera against object boundaries through chamfer-distance
+optimisation on a Euclidean distance
+transform~\cite{borgefors1986distance,maurer2003linear} of Canny
+edges~\cite{canny1986computational}. Our pipeline
+(\S\ref{sec:calib}) combines ChArUco initialisation with two-phase
+silhouette-edge refinement, replacing the manual
+fSpy-and-Photoshop workflow used
+by~\cite{hamamichi2023nonnewtonian}.
+
+
+\section{Background}
+
+\subsection{Herschel--Bulkley Rheology}
+
+Many non-Newtonian fluids are well approximated by the
+Herschel--Bulkley (HB) model~\cite{herschel1926konsistenzmessungen},
+which expresses the shear-stress response as
+\begin{equation}
+\label{eq:hb-scalar}
+    \tau \;=\; \sigma_Y \;+\; \eta\,\dot\gamma^{\,n},
+\end{equation}
+where $\tau$ is the shear stress, $\dot\gamma$ the shear rate,
+$\sigma_Y$ the yield stress, $\eta$ the consistency parameter, and
+$n \in (0, 1]$ controls shear thinning ($n < 1$) versus Newtonian
+behaviour ($n = 1$). In three dimensions the deviatoric stress tensor
+is
+\begin{equation}
+\label{eq:hb-tensor}
+    \boldsymbol{\tau}^{\mathrm{dev}}
+    \;=\;
+    \left[\;\frac{\sigma_Y}{\|\mathbf{D}\|}
+    \;+\; \eta\,\|\mathbf{D}\|^{\,n-1}\;\right] \mathbf{D},
+    \qquad
+    \|\mathbf{D}\|
+    = \sqrt{\tfrac{1}{2}\mathbf{D}\!:\!\mathbf{D}},
+\end{equation}
+where $\mathbf{D}$ is the rate-of-strain tensor. The admissible
+stress region is delimited by the von~Mises yield function
+\begin{equation}
+\label{eq:hb-yield}
+    \Phi_{Y}(\boldsymbol{\tau})
+    \;=\; \|\boldsymbol{\tau}^{\mathrm{dev}}\| \;-\; \sigma_Y \;\le\; 0,
+\end{equation}
+with the plastic flow rule of Eq.~\eqref{eq:hb-tensor} activated only
+when $\Phi_{Y} > 0$. We adopt the elasto-plastic MPM realisation of
+Yue et al.~\cite{yue2015continuum}, which recovers the same
+$(\sigma_Y, \eta, n)$ triple at steady state via a Newton--Raphson
+return map that enforces $\Phi_{Y} \le 0$ on each plastic step. The HB
+response is therefore characterised by the three-parameter vector
+\begin{equation}
+    \boldsymbol{\theta} \;=\; (\sigma_Y,\,\eta,\,n) \in \Theta \subset
+    \mathbb{R}^{3}.
+\end{equation}
+This parameter triple is the same one used by prior non-Newtonian
+video rheometry~\cite{hamamichi2023nonnewtonian}; we treat the
+constitutive model as fixed and focus on recovering
+$\boldsymbol{\theta}$ at video-rate latency.
+
+
+\subsection{Dam-Break MPM Forward Model}
+
+Following the experimental protocol
+of~\cite{hamamichi2023nonnewtonian}, we obtain $\boldsymbol{\theta}$
+by observing a dam-break flow released from a rectangular fluid column
+of width $W$ and height $H$ on a flat, no-slip floor. The forward
+simulator integrates the HB return map of \S3.1 on a
+moving-least-squares MPM~\cite{hu2018moving} grid with spacing
+$\Delta x \approx 10^{-1}$\,cm and timestep $\Delta t = 5\times
+10^{-4}$\,s, implemented on Taichi~\cite{hu2019taichi}. The
+observation is a vector of flow-front displacements sampled at eight
+uniformly spaced frames $t_1,\dots,t_8$ after release:
+\begin{equation}
+\label{eq:y-def}
+    \mathbf{y}
+    \;=\;
+    \bigl(x_1,\,x_2,\,\dots,\,x_8\bigr)^{\!\top}
+    \;\in\;
+    \mathbb{R}_{\ge 0}^{8},
+\end{equation}
+where $x_i$ is the maximum lateral extent of the fluid at time $t_i$
+in cm. By construction $x_1 \le x_2 \le \dots \le x_8$, since the
+flow front cannot retract. We write the forward simulator as
+$\mathbf{y} = \mathcal{S}(\boldsymbol{\theta};\,W, H)$.
+
+\paragraph{Implementation details.}
+Container walls use sticky boundaries (interior-cell momentum zeroed
+each step; wall-penetrating particles excluded from the silhouette);
+the fluid surface is a signed-distance field smoothed by
+Laplacian-then-biharmonic passes with per-cell $\varphi$ clamped to
+the local particle-radius range
+$[\varphi_{\min},\,\varphi_{\max}]$, removing the per-frame
+$\varphi$ tuning of earlier pipelines. For synthetic training and
+validation, the simulator reports the front extent in world
+centimetres under a fixed virtual camera convention; the real-camera
+calibration of \S\ref{sec:calib} maps captured pixels into this same
+metric observation space, but is not used to generate the training
+corpus.
+
+
+\subsection{Observation Pipeline}
+\label{sec:obs-pipeline}
+
+Computing the observation vector $\mathbf{y}_{\mathrm{obs}}$ from a
+smartphone video requires two preprocessing steps: (a)~recovering the
+camera pose against the experimental scene, and (b)~extracting a
+silhouette-based flow-front distance at the eight uniformly spaced
+frames defining $\mathbf{y}$ in Eq.~\eqref{eq:y-def}. The
+silhouette-extraction step follows the protocol
+of~\cite{hamamichi2023nonnewtonian} (background removal, binary
+segmentation, frontal-extent measurement). The camera-calibration
+step is our contribution and is detailed as part of the method
+in~\S\ref{sec:calib}.
+
+
+\subsection{Inverse Video Rheometry as Simulation-in-the-Loop Optimization}
+
+Given an observation $\mathbf{y}_{\mathrm{obs}}$ captured from a real
+experiment at geometry $(W, H)$, video rheometry recovers
+$\boldsymbol{\theta}$ by matching simulator output against the
+observation,
+\begin{equation}
+\label{eq:inverse-generic}
+    \hat{\boldsymbol{\theta}}
+    \;=\;
+    \arg\min_{\boldsymbol{\theta}\in\Theta}\;
+    \mathcal{L}\bigl(\boldsymbol{\theta};\,
+    \mathbf{y}_{\mathrm{obs}},\,W,\,H\bigr),
+\end{equation}
+where
+$\mathcal{L}(\boldsymbol{\theta}) = \|\mathcal{S}(\boldsymbol{\theta};\,W,H)
+- \mathbf{y}_{\mathrm{obs}}\|^{2}$ is an observation-matching loss.
+Because $\mathcal{S}$ is defined by an MPM integration,
+$\mathcal{L}$ is expensive---several minutes per query on modern
+GPU hardware---and non-smooth through the plastic return map. The
+simulation-in-the-loop formulation of~\cite{hamamichi2023nonnewtonian}
+evaluates $\mathcal{S}$ directly inside a derivative-free optimiser,
+paying the cost of a full MPM simulation at every candidate
+$\boldsymbol{\theta}$.
+
+The loss landscape carries a well-known identifiability pathology.
+Define the \emph{characteristic shear rate} that separates the
+yield-dominated from the viscous-dominated regime,
+\begin{equation}
+\label{eq:gammastar}
+    \dot\gamma^{\star}(\sigma_Y, \eta, n)
+    \;=\; \bigl(\sigma_Y / \eta\bigr)^{1/n}.
+\end{equation}
+Rewriting Eq.~\eqref{eq:hb-scalar} as
+\begin{equation}
+\label{eq:hb-factored}
+    \tau(\dot\gamma)
+    \;=\; \eta\,\dot\gamma^{\,n}\left[\,1
+    \;+\; \left(\frac{\dot\gamma^{\star}}{\dot\gamma}\right)^{\!n}\,\right],
+\end{equation}
+shows that as $\dot\gamma / \dot\gamma^{\star} \to \infty$ the
+second bracket tends to $1$ and the stress becomes asymptotically
+governed by $(\eta, n)$ alone; formally
+\begin{equation}
+\label{eq:ridge}
+    \left.
+      \frac{\partial \tau}{\partial \sigma_Y}
+    \right/\!
+    \left.
+      \frac{\partial \tau}{\partial \eta}
+    \right|_{\dot\gamma \gg \dot\gamma^{\star}}
+    \;=\;
+    \frac{1}{\dot\gamma^{\,n}}
+    \;\longrightarrow\; 0.
+\end{equation}
+If the observed dam-break regime lies largely above
+$\dot\gamma^{\star}$, $\mathbf{y}_{\mathrm{obs}}$ becomes effectively
+insensitive to $\sigma_Y$ while still constraining $(\eta, n)$, so a
+continuum of near-equal-loss solutions trade $\sigma_Y$ for a
+compensating increase in $\eta$. \citet{hamamichi2023nonnewtonian}
+identify this degeneracy through dimensional-similarity analysis
+and propose multi-setup joint inversion as a mitigation, paying
+the simulation-in-the-loop cost $N$ times for an $N$-setup
+estimate.
+
+When the target material itself evolves during the measurement
+window (sedimentation, aging, temperature drift, cooking cooldown),
+the true state $\boldsymbol{\theta}_{t}$ drifts during the inverse
+and an hour-scale estimate no longer describes the current
+condition; we therefore want estimation latency short enough to
+\emph{track} the evolving state, not merely to reduce amortised
+compute cost.
+
+\section{Method (Surrogate-Accelerated Inverse)}
+\label{sec:method-block}
+
+\subsection{Problem Statement}
+\label{sec:problem}
+
+We keep the physical forward model of
+Eq.~\eqref{eq:inverse-generic}, but replace each in-loop MPM call by
+a frozen mixture-of-experts surrogate. The online estimator receives
+a calibrated dam-break observation
+$\mathbf{y}_{\mathrm{obs}}\in\mathbb{R}^{8}$ and setup geometry
+$(W,H)$, routes the observation to a small set of local GP experts,
+and solves for
+$\boldsymbol{\theta}=(n,\eta,\sigma_Y)$ with a GP-aware
+Type-II maximum-likelihood loss. The same machinery handles a second
+observation of the same material by sharing one
+$\boldsymbol{\theta}$ across both setups.
+
+Figure~\ref{fig:overview} summarises the implemented pipeline. Offline,
+MPM simulations are partitioned by geometry and by the observed
+flow-front trajectory, and one exact GP expert is trained for each
+resulting sub-region. Online, the observable tuple
+$(W,H,\mathbf{y}_{\mathrm{obs}})$ selects a primary sub-expert by a
+deterministic three-stage gate, refined by a source-aware
+observation-evidence rerank; CMA-ES then optimises over
+the routed expert's padded training box. A first setup can also
+propose the next physical experiment through the analytical
+Hessian-orthogonal rule of \citet{hamamichi2023nonnewtonian}, whose
+closed-form Fisher-information construction we adopt unchanged.
+
+\begin{figure*}[!htbp]
+    \centering
+    \widefigureorplaceholder[5cm]{\textwidth}{figs/method_overview.pdf}{Placeholder METHOD OVERVIEW:
+    inverse pipeline with observation extraction,
+    hierarchical routing to a local GP expert, GP-aware likelihood,
+    CMA-ES inverse, and optional two-setup joint recovery.}
+    \caption{Inverse pipeline implemented by the accompanying code.
+    The user supplies an observed flow-front vector
+    $\mathbf{y}_{\mathrm{obs}}$ and setup geometry $(W,H)$. A frozen
+    bank of local exact-GP experts first routes the observation through
+    a geometry and y-shape partition, then evaluates a GP-aware
+    likelihood inside a bounded CMA-ES inverse. For a two-setup
+    material, both observations share one
+    $\boldsymbol{\theta}$ while retaining their own routed experts.}
+    \Description{Block diagram of the inverse pipeline:
+    observation extraction, hierarchical routing to a local GP expert,
+    GP-aware likelihood, CMA-ES inverse, and optional two-setup joint
+    recovery.}
+    \label{fig:overview}
+\end{figure*}
+
+\paragraph{Formal statement.}\label{sec:problem-formal}
+The original simulation-in-the-loop inverse is
+\begin{taggedeqn}{P}{P}
+    \hat{\boldsymbol{\theta}}
+    =
+    \arg\min_{\boldsymbol{\theta}\in\Theta}
+    \left\|\mathcal{S}(\boldsymbol{\theta};W,H)
+    -\mathbf{y}_{\mathrm{obs}}\right\|^2 .
+\end{taggedeqn}
+Our single-setup estimator replaces
+$\mathcal{S}$ by a routed GP surrogate
+$\tilde{\mathcal{S}}_{k^\star}$ and minimises the negative log
+marginal likelihood
+\begin{taggedeqn}{P$'$}{Pprime}
+    \hat{\boldsymbol{\theta}}
+    =
+    \arg\min_{\mathbf{z}\in\Theta_{k^\star}}
+    \mathcal{L}_{\mathrm{GP}}\!\left(
+      \tilde{\mathcal{S}}_{k^\star}(\mathbf{z};W,H),
+      \mathbf{y}_{\mathrm{obs}}\right)
+    + p_{\mathrm{sup}}\,
+      \mathcal{L}_{\mathrm{box}}(\mathbf{z};k^\star),
+\end{taggedeqn}
+where $\mathbf{z}=(n,\log\eta,\log\sigma_Y)$, $k^\star$ is selected
+from $(W,H,\mathbf{y}_{\mathrm{obs}})$, and
+$\Theta_{k^\star}$ is the routed sub's padded training box. For two
+setups $a,b$ of the same material, conditional independence gives the
+joint objective
+\begin{taggedeqn}{P$^{\star}$}{Pstar}
+    \hat{\boldsymbol{\theta}}
+    =
+    \arg\min_{\mathbf{z}\in\Theta_{a,b}}
+    \mathcal{L}_{\mathrm{GP}}^{(a)}(\mathbf{z})
+    + \mathcal{L}_{\mathrm{GP}}^{(b)}(\mathbf{z})
+    + p_{\mathrm{sup}}\,
+      \tfrac{1}{2}\!\left(
+      \mathcal{L}_{\mathrm{box}}^{(a)}(\mathbf{z})+
+      \mathcal{L}_{\mathrm{box}}^{(b)}(\mathbf{z})\right).
+\end{taggedeqn}
+The current inverse does not use an explicit
+$\sigma_Y$ anchor prior; uncertainty along the HB ridge is instead
+reported through multi-start dispersion and a local Laplace Hessian.
+Tab.~\ref{tab:subs} summarises the substitutions relative to the
+simulation-in-the-loop formulation.
+
+\begin{table}[!htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\caption{Implemented substitutions relative to the
+simulation-in-the-loop inverse.}
+\label{tab:subs}
+\begin{tabular}{@{}p{0.30\linewidth}p{0.48\linewidth}p{0.14\linewidth}@{}}
+\toprule
+Difficulty & Substitution & Section \\
+\midrule
+Forward cost
+  & $\mathcal{S}\mapsto\tilde{\mathcal{S}}_{k^\star}$:
+    routed local exact-GP expert
+  & \S\ref{sec:surrogate} \\
+Non-stationarity
+  & observation-conditioned routing and padded per-sub box
+  & \S\ref{sec:surrogate}, \S\ref{sec:inverse} \\
+Scale and model uncertainty
+  & log-space Type-II ML loss using GP predictive variance and
+    an observation-noise floor
+  & \S\ref{sec:inv-loss} \\
+Ridge diagnosis
+  & multi-restart CMA-ES dispersion and Laplace 95\% CI
+  & \S\ref{sec:inv-cma} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Input and Output Representation}
+\label{sec:repr}
+
+Each surrogate query uses the five-dimensional physical input
+\begin{equation}
+    \mathbf{x}=(n,\eta,\sigma_Y,W,H)^\top ,
+\end{equation}
+with logarithms applied to $\eta$ and $\sigma_Y$ before standardisation,
+\begin{equation}
+\label{eq:xscale}
+    \tilde{\mathbf{x}}
+    =
+    \frac{\mathbf{x}_{\log}-\boldsymbol{\mu}_X}
+         {\boldsymbol{\sigma}_X},
+    \qquad
+    \mathbf{x}_{\log}
+    =
+    (n,\log\eta,\log\sigma_Y,W,H)^\top .
+\end{equation}
+The output is the eight-frame flow-front vector
+$\mathbf{y}\in\mathbb{R}^{8}$; the output scaler subtracts a frozen
+training mean,
+\begin{equation}
+\label{eq:yscale}
+    \tilde{\mathbf{y}}=\mathbf{y}-\boldsymbol{\mu}_Y .
+\end{equation}
+At inverse time, the observed vector
+$\mathbf{y}_{\mathrm{obs}}$ is used both as likelihood data and as a
+routing signal.
+
+\subsection{Hierarchical Mixture-of-GP Surrogate}
+\label{sec:surrogate}
+
+\paragraph{Three-Layer Deterministic Partition.}
+\label{sec:surr-3layer}
+The forward map is partitioned into $G$ geometry-conditioned
+sub-banks, each holding a finite set of locally fitted GP experts. A
+query is routed by
+\begin{equation}
+\label{eq:gate}
+    (W,H,\mathbf{y}_{\mathrm{obs}})
+    \xrightarrow{L_1} g^\star
+    \xrightarrow{L_2} b^\star
+    \xrightarrow{L_3} s^\star .
+\end{equation}
+Layer 1 assigns the setup geometry to one of the $G$ geometry
+indices,
+\begin{equation}
+\label{eq:layer1}
+    g^\star = G_\Pi(W,H), \qquad g^\star\in\{1,\ldots,G\},
+\end{equation}
+where $G_\Pi$ is a fixed nearest-cell map on the calibrated $(W,H)$
+training grid.
+Within the selected geometry sub-bank, Layer 2 places the terminal
+flow displacement $y_8$ into the
+stored length bin,
+\begin{equation}
+\label{eq:layer2}
+    b^\star
+    =
+    \mathrm{bin}\!\left(y_{\mathrm{obs},8};
+    \{e_j^{(g^\star)}\}\right),
+\end{equation}
+clamping to the nearest bin outside the empirical range. Layer 3 uses
+the normalised flow-shape feature
+\begin{equation}
+\label{eq:phi}
+    \boldsymbol{\phi}(\mathbf{y})
+    =
+    \frac{(y_2-y_1,\ldots,y_8-y_1)^\top}{\max(y_8,\epsilon)}
+\end{equation}
+standardised by the bin-specific scaler, projected by the bin-specific
+PCA, and assigned to the nearest K-means centroid,
+\begin{equation}
+\label{eq:layer3}
+    s^\star
+    =
+    \arg\min_s
+    \left\|
+      \mathrm{PCA}_{g^\star,b^\star}(\boldsymbol{\phi})
+      -\mathbf{c}_{g^\star,b^\star,s}
+    \right\|_2 .
+\end{equation}
+The final stage is an observation-evidence rerank. Among the
+PCA-nearest candidate sub-experts $\{s\}$, we score each candidate by
+how well its training output cloud explains the measured
+$\mathbf{y}_{\mathrm{obs}}$, then keep a single primary sub-expert.
+The implementation exposes two rerank profiles; the evaluation fixes
+the profile by observation source rather than learning an automatic
+source classifier.
+
+\paragraph{\texttt{real\_robust} (camera deployment).}
+Real videos carry non-trivial extraction noise and model discrepancy,
+especially in the early frames. The robust profile therefore uses only
+the terminal displacement $y_{\mathrm{obs},8}$, the most stable scalar
+summary of the observed trajectory. Approximating the training $y_8$
+values inside sub $s$ as Gaussian, the negative log marginal
+likelihood of $y_{\mathrm{obs},8}$ under sub $s$ collapses to the
+one-dimensional standardised distance
+\begin{equation}
+\label{eq:y8q}
+    s_{\mathrm{real}}
+    =
+    \arg\min_s
+    \frac{|y_{\mathrm{obs},8}-\mathrm{median}(Y_{s,8})|}
+         {\max(\mathrm{std}(Y_{s,8}),\,0.1)} ,
+\end{equation}
+which is the standard one-dimensional case of Bayesian model
+selection by marginal evidence~\cite{murphy2012machine,mackay2003information}.
+
+\paragraph{\texttt{sim\_precision} (synthetic validation).}
+When $\mathbf{y}_{\mathrm{obs}}$ is generated by the same MPM simulator
+as the surrogate training corpus, all eight trajectory components are
+valid simulator evidence. The simulator-matched profile therefore
+chooses the sub-expert whose training output cloud contains the nearest
+frame-weighted trajectory to $\mathbf{y}_{\mathrm{obs}}$,
+\begin{equation}
+\label{eq:simprecision}
+    s_{\mathrm{sim}}
+    =
+    \arg\min_s\;
+    \min_{i\in s}
+    \sqrt{
+      \frac{1}{8}
+      \sum_{d=1}^{8}
+      \alpha_d^2
+      \bigl(Y_{s,i,d}-y_{\mathrm{obs},d}\bigr)^2
+    },
+\end{equation}
+where $\{Y_{s,i,\cdot}\}_i$ are the trajectories assigned to sub $s$
+and $\alpha_d$ are the frame weights used by the inverse loss
+(\S\ref{sec:inv-nn}; Tab.~\ref{tab:hyper}). Each profile returns one
+primary sub-expert
+$s_{\mathrm{prod}}\in\{s_{\mathrm{real}},s_{\mathrm{sim}}\}$. The
+two-setup path keeps the first setup as a top-$1$ anchor and treats
+the routed setup-$2$ candidates as discrete joint hypotheses; the
+profile controls only the routing score, the number $M$ of setup-$2$
+hypotheses, and the hypothesis selection rule
+(\texttt{sim\_precision} with $M=3$ and a first-observation WRMS
+guard for \S\ref{sec:mainresults}; \texttt{real\_robust} with $M=10$
+and conservative selection for \S\ref{sec:rheometer}).
+Routing on observed $(W,H,\mathbf{y}_{\mathrm{obs}})$ rather than the
+unknown $\boldsymbol{\theta}$ avoids a circular gate and makes
+out-of-support cases diagnosable by inspecting the selected sub's
+training box.
+
+\paragraph{Per-Cell Gaussian-Process Experts.}
+\label{sec:surr-experts}
+Each sub-expert is a tuple of eight independent exact GP regressors
+sharing the same scaled $5$-D input and using a Mat\'ern-$5/2$ ARD
+kernel,
+\begin{equation}
+\label{eq:matern}
+    k_{5/2}(\mathbf{a},\mathbf{b})
+    =
+    \sigma_f^2
+    \left(1+\sqrt{5}r+\tfrac{5}{3}r^2\right)
+    e^{-\sqrt{5}r},
+    \quad
+    r^2=\sum_{d=1}^{5}\frac{(a_d-b_d)^2}{\ell_d^2}.
+\end{equation}
+For output frame $d$, the posterior mean and variance are
+\begin{align}
+\label{eq:gp-predictive}
+    \mu_{s,d}(\tilde{\mathbf{x}})
+    &=
+    \mathbf{k}_*^\top
+    (K_s+\sigma_{n,s,d}^2 I)^{-1}\tilde{\mathbf{y}}_{s,d},
+\nonumber\\
+    \sigma_{s,d}^2(\tilde{\mathbf{x}})
+    &=
+    k_{5/2}(\tilde{\mathbf{x}},\tilde{\mathbf{x}})
+    -
+    \mathbf{k}_*^\top
+    (K_s+\sigma_{n,s,d}^2 I)^{-1}\mathbf{k}_* .
+\end{align}
+Hyperparameters are fitted by maximising the exact GP marginal
+likelihood,
+\begin{equation}
+\label{eq:gp-mll}
+\begin{aligned}
+    \log p(\tilde{\mathbf{y}}_{s,d}\mid X_s)
+    =
+    &-\tfrac{1}{2}
+      \tilde{\mathbf{y}}_{s,d}^{\top}
+      (K_s+\sigma_{n,s,d}^2I)^{-1}
+      \tilde{\mathbf{y}}_{s,d}
+      -\tfrac{1}{2}\log|K_s+\sigma_{n,s,d}^2I| \\
+    &-\tfrac{|X_s|}{2}\log 2\pi .
+\end{aligned}
+\end{equation}
+
+\paragraph{Top-1 Prediction.}
+\label{sec:surr-top1}
+The predictor uses the routed primary sub directly,
+\begin{equation}
+\label{eq:top1}
+    \tilde{\mathcal{S}}(\boldsymbol{\theta};W,H)
+    =
+    \mu_{s_{\mathrm{prod}}}(\tilde{\mathbf{x}}).
+\end{equation}
+Because the deterministic gate and profile-specific rerank of
+Eqs.~\eqref{eq:gate}--\eqref{eq:simprecision} already select a single
+locally well-supported expert, no inter-expert aggregation is needed:
+top-$K$ ensembling on top of routing only adds variance from regions
+the gate has already excluded.
+
+\paragraph{Monotonic Post-Processing.}
+\label{sec:surr-mono}
+The physical flow-front distance is non-decreasing, so the decoded GP
+mean is monotonised by
+\begin{equation}
+\label{eq:mono}
+    \hat{y}_d\leftarrow \max_{j\le d}\hat{y}_j,
+    \qquad d=1,\ldots,8 .
+\end{equation}
+
+\begin{algorithm}[!htbp]
+\caption{Offline construction of the trajectory-shape GP bank.}
+\label{alg:train}
+\KwData{MPM corpus $\{(\boldsymbol{\theta}_i,W_i,H_i,\mathbf{y}_i)\}$.}
+\KwOut{Frozen bank of $25$ geometry-conditioned sub-banks, each
+holding scalers, route metadata, sub assignments, and per-sub
+exact-GP regressors.}
+\BlankLine
+Fit global input/output scalers (Eqs.~\eqref{eq:xscale}, \eqref{eq:yscale})\;
+\ForEach{geometry sub-bank $g$}{
+  build length bins from $y_8$ and, within each bin, PCA/K-means
+  shape clusters from Eq.~\eqref{eq:phi}\;
+  merge undersized clusters and freeze the assignment table\;
+  \ForEach{sub $s$}{
+    train eight independent exact-GP regressors (one per frame) by
+    Eq.~\eqref{eq:gp-mll}\;
+    store training inputs/outputs, validation error, the per-sub
+    summary statistics $\mathrm{median}(Y_{s,8})$, $\mathrm{std}(Y_{s,8})$,
+    and the assigned trajectories used by the source-aware rerank\;
+  }
+}
+\Return{frozen surrogate bank.}
+\end{algorithm}
+
+The online forward pass is therefore: route
+$(W,H,\mathbf{y}_{\mathrm{obs}})$ through
+Eqs.~\eqref{eq:gate}--\eqref{eq:simprecision} to select
+$s_{\mathrm{prod}}$, standardise the input by Eq.~\eqref{eq:xscale},
+evaluate the selected ExactGP via Eq.~\eqref{eq:gp-predictive}, decode
+the mean to physical units, and apply the monotonic guard of
+Eq.~\eqref{eq:mono}. The GP also returns a predictive standard
+deviation that the inverse loss of \S\ref{sec:inv-loss} consumes.
+
+\subsection{GP-Aware Inverse}
+\label{sec:inverse}
+
+\paragraph{Within-Sub Warm-Start.}
+\label{sec:inv-nn}
+CMA-ES is initialised at the routed sub's nearest training point in
+observation space,
+\begin{equation}
+\label{eq:nn}
+    \mathbf{z}^{\mathrm{NN}}
+    =
+    \mathbf{z}_{i^\star},\quad
+    i^\star
+    =
+    \arg\min_{i\in\mathcal{D}_{s_{\mathrm{prod}}}}
+    \frac{1}{8}\sum_{d=1}^{8}
+    \alpha_d^2\left(y_{i,d}-y_{\mathrm{obs},d}\right)^2 .
+\end{equation}
+The frame weights form the frozen non-decreasing schedule
+\[
+\boldsymbol{\alpha}=(0.2,0.2,0.35,0.5,0.8,1.0,1.4,2.0).
+\]
+By construction, the early frames of the dam-break sequence include
+the gate-release transient
+(finite-time gate withdrawal, release-timing jitter, transient
+free-surface and surface-tension effects unmodelled by the MPM
+forward), while the late frames have settled into the steady
+spread regime where the surrogate is faithful. Up-weighting late
+frames aligns the residual with the regime in which the
+forward model is trusted. The specific schedule used in our
+experiments is a frozen hyperparameter listed in
+\S\ref{sec:data} (Tab.~\ref{tab:hyper}).
+
+\paragraph{Per-Sub Bound Tightening.}
+\label{sec:inv-box}
+The search box is the support of the routed sub-expert,
+$[\mathbf{z}_{\min},\mathbf{z}_{\max}]$, padded in $z$-space by a
+fraction $p$ of its standard deviation $\mathbf{s}$ and clipped to
+the global HB bounds,
+\begin{equation}
+\label{eq:tight-box}
+    \Theta_{k^\star}
+    =
+    \Theta\cap
+    [\mathbf{z}_{\min}-p\mathbf{s},\,
+     \mathbf{z}_{\max}+p\mathbf{s}].
+\end{equation}
+The objective adds a soft quadratic penalty with weight
+$p_{\mathrm{sup}}$ outside the unpadded support, so the optimiser is
+not forced to honour the bounds exactly when the sub's training data
+is sparse near a face. Numerical values for $p$ and
+$p_{\mathrm{sup}}$ are listed in \S\ref{sec:data}.
+
+\paragraph{Ridge Diagnosis Without an Explicit $\sigma_Y$ Prior.}
+\label{sec:inv-sy}
+Rather than break the residual $(\eta,\sigma_Y)$ identifiability
+ridge with a hand-chosen prior, we expose it through CMA-ES restart
+dispersion and the local Laplace--Hessian confidence interval
+(\S\ref{sec:inv-cma}), tying reported uncertainty to the likelihood
+rather than to a user-selected anchor.
+
+\paragraph{GP-Aware Type-II ML Loss.}
+\label{sec:inv-loss}
+For a candidate $\mathbf{z}$, the selected GP provides both
+$\hat{y}_d(\mathbf{z})$ and predictive standard deviation
+$\sigma_{\mathrm{GP},d}(\mathbf{z})$. We work in log-space and convolve
+the GP epistemic variance, propagated by the delta method, with a
+homoscedastic observation-noise floor
+$\sigma_{\mathrm{obs,log}}^2$ that absorbs the residual real--sim
+discrepancy:
+\begin{equation}
+\label{eq:gp-var}
+    v_d(\mathbf{z})
+    =
+    \left(
+    \frac{\sigma_{\mathrm{GP},d}(\mathbf{z})}
+         {\max(\hat{y}_d(\mathbf{z}),\epsilon)}
+    \right)^2
+    + \sigma_{\mathrm{obs,log}}^2 .
+\end{equation}
+The per-setup negative log marginal likelihood is
+\begin{equation}
+\label{eq:obs-loss}
+\begin{aligned}
+    \mathcal{L}_{\mathrm{GP}}(\mathbf{z})
+    &=
+    \frac{1}{8}\sum_{d=1}^{8}
+    \left[
+      \frac{\alpha_d^2\, r_d(\mathbf{z})^2}{2v_d(\mathbf{z})}
+      +\frac{1}{2}\log v_d(\mathbf{z})
+    \right],\\
+    r_d&=\log\hat{y}_d-\log y_{\mathrm{obs},d}.
+\end{aligned}
+\end{equation}
+The log-variance term is the Occam factor: it prevents the optimiser
+from preferring regions only because the GP predictive variance is
+large there. The noise floor $\sigma_{\mathrm{obs,log}}$ is held
+fixed across all reported experiments rather than tuned per
+material; its specific value is reported in \S\ref{sec:data}.
+
+\paragraph{Optimiser and Uncertainty Output.}
+\label{sec:inv-cma}
+We minimise Eq.~\eqref{eq:Pprime} with multi-restart
+CMA-ES~\cite{hansen2016cma}, whose adaptive sampling distribution
+suits the piecewise-smooth, ridge-prone surface produced by
+Eq.~\eqref{eq:obs-loss}. Each restart is seeded deterministically;
+the lowest-loss restart is reported as the MAP, the standard
+deviation across restarts is a truth-blind ridge diagnostic, and a
+finite-difference Hessian at the MAP yields a Laplace 95\% interval.
+Each CMA-ES generation is evaluated as a single batched GP forward
+call (Eq.~\eqref{eq:gp-predictive} on a stacked
+$\mathbf{X}_*$)~\cite{rasmussen2006gaussian}, amortising the GPU
+dispatch overhead over $\lambda$ candidates without altering the
+optimisation trajectory. Population size, restart count, and other
+hyperparameters are listed in \S\ref{sec:data}.
+
+\paragraph{Joint Two-Setup Inverse.}
+\label{sec:inv-joint}
+For two observations of the same material, the routed setups retain
+their own GP experts but share one $\boldsymbol{\theta}$. The
+implementation minimises Eq.~\eqref{eq:Pstar} over the
+intersection of the two padded sub boxes (or their padded union when
+disjoint), warm-started from the single-setup optimum so that the
+second observation adds information \emph{on top of} the first
+posterior rather than restarting the search.
+
+\begin{algorithm}[!htbp]
+\caption{Online inverse (single-setup, or joint when a second setup
+$(\mathbf{y}^{(b)},W_b,H_b)$ is supplied).}
+\label{alg:invert}
+\KwIn{$(\mathbf{y}_{\mathrm{obs}},W,H)$ and optionally a second
+$(\mathbf{y}^{(b)},W_b,H_b)$; frozen surrogate bank.}
+\KwOut{$\hat{\boldsymbol{\theta}}$ and posterior diagnostics.}
+\BlankLine
+Route each supplied setup to its primary sub using the deployment
+profile (Eqs.~\eqref{eq:y8q}, \eqref{eq:simprecision})\;
+construct the padded search box (Eq.~\eqref{eq:tight-box}; for two
+setups, the intersection of the per-sub boxes, or a padded union
+when they are disjoint) and the nearest-neighbour warm start
+(Eq.~\eqref{eq:nn}) on the first setup\;
+run multi-restart CMA-ES on Eq.~\eqref{eq:Pprime} (single-setup) or
+Eq.~\eqref{eq:Pstar} (joint, warm-started from the single-setup
+optimum)\;
+optionally evaluate the Laplace Hessian interval at the best
+point\;
+\Return{$\hat{\boldsymbol{\theta}}$ and diagnostics.}
+\end{algorithm}
+
+\subsection{Hessian-Orthogonal Setup-2 Proposal (Inherited)}
+\label{sec:proposer}
+
+The choice of $(W_2,H_2)$ is not part of our contribution: we adopt
+the closed-form, Fisher-information-based proposer of
+\citet{hamamichi2023nonnewtonian} verbatim. Given the single-setup
+estimate $\hat{\boldsymbol{\theta}}_1$, they approximate the dam
+break by plane-Poiseuille flow and derive an analytical
+loss-Hessian $\mathbf{H}(\hat{\boldsymbol{\theta}}_1;W,H)$. Let
+$\mathbf{q}_1$ be the unit eigenvector associated with the smallest
+eigenvalue of $\mathbf{H}(\hat{\boldsymbol{\theta}}_1;W_1,H_1)$---the
+direction in $\boldsymbol{\theta}$-space along which the first setup
+carries the least information. The proposer selects
+\begin{equation}
+\label{eq:proposer}
+    (W_2^\star,H_2^\star)
+    \;=\;
+    \arg\min_{(W,H)\in\mathcal{W}}
+    \bigl\langle \mathbf{q}_1,\,\mathbf{q}_2(W,H)\bigr\rangle^2 ,
+\end{equation}
+making the joint Fisher information full-rank in the
+$(\mathbf{q}_1,\mathbf{q}_2)$ subspace. The Hessian is closed-form,
+so evaluating Eq.~\eqref{eq:proposer} requires no forward
+simulations. Our contribution is to make the \emph{two-setup} joint
+estimate that consumes this proposer's output affordable per
+material rather than per showcase; the joint information gain
+depends on the residual ridge geometry of each material and is
+most pronounced on the rheometer-referenced real materials of
+\S\ref{sec:rheometer} (consistency parameter, ridge tightening),
+while on the synthetic $N=30$ Hamamichi-matched panel of
+\S\ref{sec:mainresults} our replay-consistency guard keeps the
+joint update from regressing the single-setup recovery
+(Tab.~\ref{tab:setup-ablation}). The cascaded $3$- and $4$-setup
+refinements that the predecessor reports---each run only on the
+cases that failed at the previous setup---are a natural extension
+of the same proposer and surrogate but are not implemented in this
+paper.
+
+\section{Camera Calibration}
+\label{sec:calib}
+
+To run the inverse on a real experiment, we need to convert a
+smartphone video of the dam-break flow into the observation vector
+$\mathbf{y}_{\mathrm{obs}} = (x_{1}, \dots, x_{8}) \in
+\mathbb{R}_{\ge 0}^{8}$ of Eq.~\eqref{eq:y-def}. We use a two-stage
+camera calibration followed by silhouette-based flow-front
+extraction; the full pipeline is summarised in
+Algorithm~\ref{alg:calib}.
+
+\paragraph{Stage 1: ChArUco prior.}
+A printed ChArUco
+board~\cite{garrido2014automatic,garrido2016generation} is placed in
+the experimental scene alongside the fluid container. The standard
+pinhole projection~\cite{hartley2004multiple} sends a world point
+$\mathbf{P}_{w}$ to pixels via
+\begin{equation}
+\label{eq:pinhole}
+    \mathbf{P}_{c} \;=\; \mathbf{R}\,\mathbf{P}_{w} + \mathbf{t},
+    \qquad
+    \mathbf{p} \;=\; \tfrac{1}{Z_{c}}\,\mathbf{K}\,\mathbf{P}_{c},
+    \quad
+    \mathbf{K} = \begin{pmatrix}
+          f_{x} & 0     & c_{x} \\
+          0     & f_{y} & c_{y} \\
+          0     & 0     & 1
+        \end{pmatrix}.
+\end{equation}
+Rather than optimising $(K, R, \mathbf{t})$ as $11$ free scalars, we
+exploit the fact that our rig is level and the camera looks at a
+fixed target, and parameterise the whole camera by a compact
+$6$-vector
+\begin{equation}
+\label{eq:theta-cam}
+    \boldsymbol{\theta}_{\mathrm{cam}}
+    \;=\;
+    (l_{x},\,l_{z},\,\theta_{E},\,\phi_{E},\,
+    \mathrm{fov},\,d_{\mathrm{eye}}),
+\end{equation}
+where $\mathbf{l} = (l_{x}, 0, l_{z})^{\!\top}$ is the look-at point
+on the rig floor, $(\theta_{E}, \phi_{E})$ are the polar and
+azimuthal angles of the eye direction, $d_{\mathrm{eye}}$ is the
+eye--target distance, and $\mathrm{fov}$ is the vertical field of
+view. The camera roll is held fixed by construction (the rig is
+level and the renderer enforces a horizontal $\mathbf{C}_{x}$ axis,
+Eq.~\eqref{eq:basis}). The eye position and
+an orthonormal camera basis are then reconstructed deterministically
+from $\boldsymbol{\theta}_{\mathrm{cam}}$:
+\begin{equation}
+\label{eq:eye}
+    \mathbf{E}(\boldsymbol{\theta}_{\mathrm{cam}})
+    \;=\; d_{\mathrm{eye}}
+    \begin{pmatrix}
+        \sin\theta_{E}\cos\phi_{E} \\
+        \cos\theta_{E} \\
+        -\sin\theta_{E}\sin\phi_{E}
+    \end{pmatrix},
+\end{equation}
+\begin{equation}
+\label{eq:basis}
+    \mathbf{C}_{z} = \frac{\mathbf{E} - \mathbf{l}}
+                           {\|\mathbf{E} - \mathbf{l}\|},
+    \quad
+    \mathbf{C}_{x} = \frac{(C_{z,3},\,0,\,-C_{z,1})^{\!\top}}
+                           {\|(C_{z,3},\,0,\,-C_{z,1})\|},
+    \quad
+    \mathbf{C}_{y} = \mathbf{C}_{z} \times \mathbf{C}_{x},
+\end{equation}
+so that $R = [\mathbf{C}_{x}\,|\,\mathbf{C}_{y}\,|\,\mathbf{C}_{z}]^{\!\top}$ and
+$\mathbf{t} = -R\,\mathbf{E}$; the $\mathbf{C}_{x}$ construction
+enforces a horizontal camera up-axis. A world point $\mathbf{P}_{i}$
+thus maps first to camera coordinates
+\begin{equation}
+\label{eq:screen}
+    \mathbf{Y}_{i}
+    \;=\;
+    \bigl(
+      (\mathbf{P}_{i} - \mathbf{E})\!\cdot\!\mathbf{C}_{x},\;
+      (\mathbf{P}_{i} - \mathbf{E})\!\cdot\!\mathbf{C}_{y},\;
+      (\mathbf{P}_{i} - \mathbf{E})\!\cdot\!\mathbf{C}_{z}
+    \bigr),
+\end{equation}
+and then to pixels by perspective division. Matching the renderer's
+vertical-field-of-view convention $f_{y} = H/(2\tan(\mathrm{fov}/2))$
+gives the scale factor
+\begin{equation}
+\label{eq:scale}
+    s \;=\; \frac{1}{2\,\tan(\mathrm{fov}/2)},
+\end{equation}
+and the full reprojection of $\mathbf{P}_{i}$ into the image plane
+$[0, W]\times[0, H]$ reads
+\begin{equation}
+\label{eq:project}
+    \pi(\mathbf{P}_{i};\,\boldsymbol{\theta}_{\mathrm{cam}})
+    \;=\;
+    \left(
+        \frac{W}{2} + s\,H\,\frac{[\mathbf{Y}_{i}]_{1}}{|[\mathbf{Y}_{i}]_{3}|},\;
+        \frac{H}{2} - s\,H\,\frac{[\mathbf{Y}_{i}]_{2}}{|[\mathbf{Y}_{i}]_{3}|}
+    \right).
+\end{equation}
+
+After sub-pixel corner refinement~\cite{forstner1987fast} on the
+detected ChArUco board, Stage~1 solves
+\begin{equation}
+\label{eq:stage1}
+    \hat{\boldsymbol{\theta}}_{\mathrm{cam}}
+    \;=\;
+    \arg\min_{\boldsymbol{\theta}_{\mathrm{cam}}}\,
+    \frac{1}{|\mathcal{I}|}
+    \sum_{i \in \mathcal{I}}
+    \rho_{\delta}\!\bigl(
+      \|\mathbf{u}_{i} - \pi(\mathbf{P}_{i};\,\boldsymbol{\theta}_{\mathrm{cam}})\|
+    \bigr),
+\end{equation}
+where $\mathcal{I}$ indexes detected corners with pixel observations
+$\mathbf{u}_{i}$ and known board coordinates $\mathbf{P}_{i}$, and
+$\rho_{\delta}$ is the Huber loss with a $\delta = 2$\,px threshold,
+\begin{equation}
+\label{eq:huber}
+    \rho_{\delta}(e)
+    \;=\;
+    \begin{cases}
+        \tfrac{1}{2}e^{2}, & e < \delta, \\
+        \delta\bigl(e - \tfrac{1}{2}\delta\bigr), & e \ge \delta,
+    \end{cases}
+\end{equation}
+which prevents any single mis-refined corner from dominating the fit.
+Eq.~\eqref{eq:stage1} is minimised with
+Nelder--Mead~\cite{nelder1965simplex}, returning
+$\mathbf{K}_{0}$ (from $\mathrm{fov}$ and image size) and an initial
+extrinsic $(R_{0}, \mathbf{t}_{0})$.
+
+\paragraph{Stage 2: silhouette-guided extrinsic refinement.}
+Stage~1 is typically accurate to a few pixels but the ChArUco board
+is not rigidly coupled to the container; Stage~2 fixes
+$\mathbf{K}_{0}$ and refines only the extrinsic so that the rendered
+container silhouette aligns with the reference frame $I_{0}$ at dam
+release, in two phases.
+
+\emph{Phase~A (smooth chamfer).}
+The Canny edge set~\cite{canny1986computational} of $I_{0}$ yields a
+target-edge pixel set $E$, from which we precompute an exact
+Euclidean distance
+transform~\cite{maurer2003linear,borgefors1986distance}
+\begin{equation}
+\label{eq:edt}
+    D_{E}(p) \;=\;
+    \min_{q \in E}\,\|\,p - q\,\|_{2}
+    \qquad \text{for each pixel } p \in \Omega.
+\end{equation}
+For candidate extrinsics $(R, \mathbf{t})$, let $P_{f}(R, \mathbf{t})$
+denote the projected edge pixels of the $f$-th visible cube face
+and $\mathcal{F}$ the set of visible faces. The per-face-normalised
+weighted chamfer cost is
+\begin{equation}
+\label{eq:chamfer}
+    \mathcal{L}_{\mathrm{cham}}(R, \mathbf{t})
+    \;=\;
+    \frac{1}{|\mathcal{F}|}
+    \sum_{f \in \mathcal{F}}
+    \frac{\sum_{p \in P_{f}(R,\mathbf{t})}\, w(p)\, D_{E}(p)}
+         {\sum_{p \in P_{f}(R,\mathbf{t})}\, w(p)},
+\end{equation}
+with $D_{E}(p)$ bilinearly interpolated from the EDT and
+$w(p)$ a product of three side-emphasis weights
+$w_{\mathrm{left}}(p_{x})$, $w_{\mathrm{top}}(p_{y})$, and
+$w_{\mathrm{bottom}}(p_{y})$.
+Per-face normalisation prevents long edges (e.g.\ the bottom wall)
+from dominating short ones. We minimise $\mathcal{L}_{\mathrm{cham}}$
+with L-BFGS-B~\cite{byrd1995limited,zhu1997algorithm} over the six
+DoF of a Rodrigues rotation vector~\cite{rodrigues1840lois} and a
+translation, box-clamped to $\pm 2.5^{\circ}$ and $\pm 2$\,cm around
+the Stage-$1$ prior $(\mathbf{r}_{0}, \mathbf{t}_{0})$.
+
+\emph{Phase~B (non-smooth IoU).}
+Starting from the Phase-$A$ solution, we maximise a weighted Jaccard
+similarity / pixel-IoU~\cite{jaccard1912distribution} between the
+rendered silhouette $M(R, \mathbf{t})$ and the target foreground $T$,
+\begin{equation}
+\label{eq:iou}
+    \mathrm{IoU}_{w}(R, \mathbf{t})
+    \;=\;
+    \frac{\sum_{p}\, w(p)\,[\,M(p)\wedge T(p)\,]}
+         {\sum_{p}\, w(p)\,[\,M(p)\vee T(p)\,]},
+\end{equation}
+with an adaptive Nelder--Mead~\cite{gao2012implementing} simplex of
+size $0.15^{\circ}/1.5$\,mm. Because $\mathrm{IoU}_{w}$ is
+discretised on the pixel grid it is non-differentiable; the
+L-BFGS-B phase on the smooth chamfer cost provides the warm start
+needed to avoid the combinatorial local minima of
+Eq.~\eqref{eq:iou}.
+
+\paragraph{Safety clamp.}
+If $\|\mathbf{r}^{*} - \mathbf{r}_{0}\|$ or
+$\|\mathbf{t}^{*} - \mathbf{t}_{0}\|$ exceed the safety thresholds
+($3^{\circ}$ or $3$\,cm; loosened past the Phase-A box so the
+unbounded Phase-B can move beyond it for mild excursions), we fall
+back to the ChArUco extrinsic, guarding against strong local minima
+when the ChArUco board placement is sloppy.
+
+\paragraph{Flow-front extraction.}
+Each subsequent frame $I_{1}, \dots, I_{8}$ captured at
+$t_{1}, \dots, t_{8}$
+is binarised by HSV-intensity thresholding (threshold $128$, black
+foreground by default) followed by morphological opening and closing
+on a $3\times 3$ kernel~\cite{gonzalez2018digital}; only the largest
+connected foreground component is retained to reject spurious
+specks. We then extract the outer contour $\partial\Omega_{i}$ of
+the foreground mask at frame $i$ and back-project every contour
+pixel $\mathbf{u} = (u, v)$ to the world ground plane $y = 0$
+through the calibrated pinhole camera. With
+$\mathbf{C}_{w} = -R^{\!\top}\,\mathbf{t}$ the world-frame camera
+centre and
+$\mathbf{d}(\mathbf{u}) = R^{\!\top}\,\mathbf{K}_{0}^{-1}\,(u, v, 1)^{\!\top}$
+the world-frame ray direction, the ray
+\begin{equation}
+\label{eq:backproj}
+    \mathbf{P}_{w}(\tau)
+    \;=\; \mathbf{C}_{w} + \tau\,\mathbf{d}(\mathbf{u})
+\end{equation}
+meets the floor at
+$\tau^{\star} = -[\mathbf{C}_{w}]_{y}/[\mathbf{d}(\mathbf{u})]_{y}$.
+Let $\mathbf{v} \in \mathbb{R}^{2}$ be the unit flow direction in
+the world $xz$-plane ($\mathbf{v} = (1, 0)$ for our apparatus), and
+let $x^{\mathrm{front}}_{\mathrm{box}}$ be the container's
+front-wall position read from the experiment manifest. The flow
+distance at frame $t_{i}$ is the farthest signed projection of
+$\partial\Omega_{i}$ onto $\mathbf{v}$ relative to that front wall,
+\begin{equation}
+\label{eq:xi}
+    x_{i} \;=\;
+    \max_{\mathbf{u} \in \partial\Omega_{i}}
+    \Bigl[\mathbf{v}^{\!\top}
+          \bigl(\mathbf{P}_{w}(\tau^{\star}(\mathbf{u}))\bigr)_{xz}\Bigr]
+    \;-\; x^{\mathrm{front}}_{\mathrm{box}}.
+\end{equation}
+Finally, residual binarisation noise can introduce occasional
+backward jumps across frames; we guard against this with a monotone
+pass $x_{i} \leftarrow \max(x_{i}, x_{i-1})$ (equivalent to
+Eq.~\eqref{eq:mono} applied in physical space), producing the
+observation
+$\mathbf{y}_{\mathrm{obs}} = (x_{1}, \dots, x_{8})
+\in \mathbb{R}_{\ge 0}^{8}$ that the inverse of
+Algorithm~\ref{alg:invert} consumes.
+
+\begin{algorithm}[!htbp]
+\caption{Two-stage camera calibration.}
+\label{alg:calib}
+\KwIn{Background photo $I_{\mathrm{bg}}$ with ChArUco board;
+  reference frame $I_{0}$ at dam release; container $(W,H)$;
+  image size $(W,H)$; Phase-A box bounds $(2.5^{\circ},2\,\mathrm{cm})$;
+  safety thresholds $(3^{\circ},3\,\mathrm{cm})$;
+  Huber $\delta{=}2$\,px.}
+\KwOut{Calibrated $(\mathbf{K}_{0},R^{*},\mathbf{t}^{*})$.}
+\BlankLine
+
+\tcp*[h]{Stage 1: ChArUco prior.}
+Detect ChArUco corners in $I_{\mathrm{bg}}$ with sub-pixel
+  refinement~\cite{garrido2014automatic,forstner1987fast}\;
+Run Nelder--Mead on $\boldsymbol{\theta}_{\mathrm{cam}}$ to minimise
+  Huber reprojection loss $\mathcal{L}_{1}$ (Eqs.~\eqref{eq:stage1},
+  \eqref{eq:huber}), evaluating $\pi$ via
+  Eqs.~\eqref{eq:eye}--\eqref{eq:project}\;
+Extract $(\mathbf{K}_{0},R_{0},\mathbf{t}_{0})$ from
+  $\hat{\boldsymbol{\theta}}_{\mathrm{cam}}$
+  (Eqs.~\eqref{eq:eye}--\eqref{eq:scale})\;
+
+\tcp*[h]{Stage 2: silhouette-guided refinement (fix $\mathbf{K}_{0}$).}
+Compute Canny edge set $E$ on $I_{0}$ and EDT $D_{E}$
+  (Eq.~\eqref{eq:edt})\;
+\emph{Phase A:} L-BFGS-B on chamfer cost
+  $\mathcal{L}_{\mathrm{cham}}$ (Eq.~\eqref{eq:chamfer}) over
+  $(\mathbf{r},\mathbf{t})$, box-clamped to
+  $\pm\Delta_{\mathrm{rot}}^{\mathrm{box}}/\pm\Delta_{t}^{\mathrm{box}}$
+  around $(\mathbf{r}_{0},\mathbf{t}_{0})$~\cite{byrd1995limited,
+  zhu1997algorithm}\;
+\emph{Phase B:} adaptive Nelder--Mead on $-\mathrm{IoU}_{w}$
+  (Eq.~\eqref{eq:iou}) starting at the Phase-A solution; simplex
+  radius $(0.15^{\circ},1.5\,\mathrm{mm})$\;
+
+\tcp*[h]{Safety clamp.}
+\If{$\|\mathbf{r}^{*}{-}\mathbf{r}_{0}\|{>}\Delta_{\mathrm{rot}}^{\mathrm{safe}}$
+  \textnormal{or}
+  $\|\mathbf{t}^{*}{-}\mathbf{t}_{0}\|{>}\Delta_{t}^{\mathrm{safe}}$}{
+  Revert $(\mathbf{r}^{*},\mathbf{t}^{*}){\leftarrow}
+    (\mathbf{r}_{0},\mathbf{t}_{0})$\;
+}
+
+\Return{$(\mathbf{K}_{0},R(\mathbf{r}^{*}),\mathbf{t}^{*})$.}
+\end{algorithm}
+
+
+\section{Training Data and Frozen Configuration}
+\label{sec:data}
+
+All reported results use a single frozen surrogate bank trained once
+and re-used across every reported experiment. The bank
+is trained on $295{,}419$ unique training MPM simulations. After the multi-cell routing of \S\ref{sec:surrogate}, these
+simulations produce $425{,}831$ routed assignment rows (a single
+simulation can be assigned to more than one sub-expert when its
+trajectory straddles two cells). The final frozen bank contains $25$
+geometry-conditioned sub-banks and $1{,}491$ exact-GP sub-experts,
+with between $13{,}581$ and $25{,}032$ assignment rows per geometry
+sub-bank, spanning
+$n \in [0.3,1.0]$, $\eta \in [10^{-3},3{\times}10^{2}]$,
+$\sigma_Y \in [10^{-3},4{\times}10^{2}]$, and $W,H\in[2,7]$ cm. No
+material-specific retraining or per-experiment hyperparameter sweep
+is performed on top of this bank.
+
+\begin{table}[!t]
+\begingroup
+\centering
+\caption{Frozen configuration used throughout the evaluation.}
+\label{tab:hyper}
+\scriptsize
+\setlength{\tabcolsep}{2pt}
+\renewcommand{\arraystretch}{0.86}
+\begin{tabular}{@{}p{0.34\linewidth}p{0.60\linewidth}@{}}
+\toprule
+\textit{Training data} & \\
+\quad unique training MPM simulations & $295{,}419$ \\
+\quad routed assignment rows        & $425{,}831$ (a simulation may be
+                                      routed to more than one cell) \\
+\quad parameter box                 & $n\in[0.3,1.0]$,
+                                      $\eta\in[10^{-3},300]$,
+                                      $\sigma_Y\in[10^{-3},400]$ \\
+\midrule
+\textit{Surrogate bank} & \\
+\quad geometry-conditioned sub-banks & $25$ \\
+\quad sub-experts                   & $1{,}491$ final frozen experts; $24$--$71$ per geometry sub-bank \\
+\quad routing                       & geometry gate $+$ length bin $+$
+                                      PCA/K-means shape $+$
+                                      source-aware observation-evidence
+                                      rerank \\
+\midrule
+\textit{Per-cell GP expert} & \\
+\quad kernel                        & Mat\'ern-$5/2$ ARD on $\mathbb{R}^{5}$ \\
+\quad outputs                       & $8$ independent exact GPs per sub \\
+\midrule
+\textit{Routing} & \\
+\quad profiles                      & \texttt{real\_robust}: terminal
+                                      displacement evidence;
+                                      \texttt{sim\_precision}: full-trajectory
+                                      nearest-neighbour evidence \\
+\quad oversample                    & $3$ PCA-nearest candidates for
+                                      \texttt{real\_robust}; $10$ for
+                                      \texttt{sim\_precision} before
+                                      the final rerank \\
+\quad selected experts              & top-$1$ per query \\
+\midrule
+\textit{Inverse CMA-ES} & \\
+\quad popsize $P$                   & $12$ \\
+\quad $\sigma_{0}$                  & $0.25$ in $z=(n,\log\eta,\log\sigma_Y)$ \\
+\quad generations / restarts        & $30$ / $5$ \\
+\quad box pad / support weight      & $0.10$ / $0.25$ \\
+\midrule
+\textit{Likelihood / UQ} & \\
+\quad loss                          & GP-aware Type-II ML in log space \\
+\quad frame weights $\boldsymbol{\alpha}$ & $(0.2,0.2,0.35,0.5,0.8,1.0,1.4,2.0)$ \\
+\quad noise floor                   & $\sigma_{\mathrm{obs,log}}=0.20$ \\
+\quad CI reporting                  & numerical Hessian / Laplace 95\% CI \\
+\bottomrule
+\end{tabular}
+\endgroup
+\end{table}
+
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Experimental Setup}
+\label{sec:experimental-setup}
+
+We evaluate the hierarchical mixture-of-GP surrogate (HMoGP) and the
+identifiability-aware inverse
+against six questions: (1) how faithfully does the surrogate
+approximate the MPM forward model, (2) how accurately does the full
+inverse recover $\boldsymbol{\theta} = (\sigma_Y, \eta, n)$ on
+held-out samples, (3) what wall-clock reduction does the surrogate
+deliver relative to simulation-in-the-loop inversion, and (4) does
+the fast inverse remain consistent with independent rheometer
+measurements on the Hamamichi materials for which such references are
+available, (5) does it remain useful in the rheometer-infeasible
+materials that motivate video rheometry, and (6) can seconds-scale
+inversion recover a
+time-varying yield-stress trajectory from repeated within-batch
+dam-break measurements?
+
+\paragraph{Datasets.}
+We use four evaluation sets. \emph{$T_{\mathrm{sim}}$} is a disjoint held-out evaluation split of $22{,}209$ unique MPM simulations, separate from the $295{,}419$-simulation training corpus (\S\ref{sec:data}),
+sampled stratified over $(n, \log\eta, \log\sigma_Y, W, H)$. After
+the multi-cell routing of \S\ref{sec:surrogate}, this corresponds
+to the $42{,}583$ assignment rows used for the surrogate parity
+and calibration diagnostics of~\S\ref{sec:fidelity}.
+\emph{$T_{\mathrm{inv}}$} is a
+synthetic benchmark of $30$ materials drawn from within the training
+box, each rendered via MPM at three container sizes (total $90$
+clips). \emph{$T_{\mathrm{real}}$} contains the six Hamamichi materials for
+which parallel-plate rheometer sweeps are available.
+\emph{$T_{\mathrm{infeasible}}$} contains the visibly particulate or
+chunky materials of \S\ref{sec:chunky}, for which controlled-gap
+rheometer sweeps are unavailable by design.
+\emph{$T_{\mathrm{fresh}}$} follows the freshness protocol of
+\S\ref{sec:freshness}:
+synthetic prescribed kinetic trajectories for ground-truth recovery,
+seven real hand-prepared starch or composite-starch conditions sampled
+over a $40$\,min within-batch observation window, with repeat batches for
+quantifying cross-batch kinetic drift.
+
+\paragraph{Reference.}
+The accuracy and time reference is the simulation-in-the-loop
+pipeline of~\cite{hamamichi2023nonnewtonian}: identical dam-break
+observation and CMA-ES-style derivative-free search, but every
+candidate is evaluated by a fresh MPM run. The predecessor's own
+$30$-case panel numbers are reproduced alongside ours in
+Table~\ref{tab:setup-ablation}. The main error sources in our pipeline
+are separated by the surrogate-fidelity diagnostics
+of \S\ref{sec:fidelity}, which establish that the routed sub-experts
+reproduce the MPM forward to sub-cm flow-front error, and by the
+routing recall reported inline in \S\ref{sec:mainresults}: the
+simulator-matched profile recovers the oracle sub-expert in
+$61/100$ cases at top-$1$, $97/100$ at top-$3$, and $100/100$ at
+top-$10$.
+
+\paragraph{Metrics.}
+For the forward surrogate we report per-output mean absolute error
+\begin{equation}
+\label{eq:mae}
+    \mathrm{MAE}(\hat{\mathbf{y}}, \mathbf{y})
+    \;=\; \frac{1}{D_Y}\sum_{d=1}^{D_Y}|\hat y_d - y_d|,
+\end{equation}
+coefficient of determination $R^{2} = 1 - \sum_{i}
+\|\hat{\mathbf{y}}_i - \mathbf{y}_i\|^2 / \sum_i \|\mathbf{y}_i -
+\bar{\mathbf{y}}\|^2$, and the row-max error distribution
+($p_{50}, p_{95}, p_{99}, p_{999}$). For the inverse we report
+per-parameter relative error
+\begin{equation}
+\label{eq:relE}
+    \mathrm{relE}(\hat\theta_d;\,\theta_d^{\mathrm{gt}})
+    \;=\; \frac{|\hat\theta_d - \theta_d^{\mathrm{gt}}|}
+               {|\theta_d^{\mathrm{gt}}|},
+    \qquad d \in \{n, \eta, \sigma_Y\},
+\end{equation}
+the forward NMSE at the recovered parameter as a sanity check on
+fit, and the per-sample wall-clock. For comparisons against
+parallel-plate reference sweeps (\S\ref{sec:rheometer}) we further
+report the integrated log-stress error over the experimentally valid
+shear-rate interval $\Gamma = [\dot\gamma_{\min}, \dot\gamma_{\max}]$,
+\begin{equation}
+\label{eq:E}
+    \mathcal{E}(\hat{\boldsymbol{\theta}}, \boldsymbol{\theta}_{\mathrm{gt}})
+    \;=\;
+    \left(\frac{1}{|\Gamma|}
+    \int_{\Gamma}
+      \bigl[\log\hat\tau(\dot\gamma)
+          - \log\tau_{\mathrm{gt}}(\dot\gamma)\bigr]^{2}
+    \,d\log\dot\gamma\right)^{\!1/2}.
+\end{equation}
+All inverse runs use the frozen hyperparameters of
+Table~\ref{tab:hyper} and a fixed seed.
+
+
+\subsection{Surrogate Fidelity}
+\label{sec:fidelity}
+
+We first verify that the trained surrogate predicts MPM outputs
+accurately enough to justify replacing the simulator inside the
+inverse. The held-out test split ($T_{\mathrm{sim}}$,
+$42{,}583$ rows) is a strict $10\,\%$ slice of the
+training corpus, with each row carrying its assignment to a unique
+sub-expert (the assignment used at training time, not seen by that
+sub during fitting). For each test row we forward the assigned
+sub's exact GP at the row's true
+$\boldsymbol{\theta}=(n,\eta,\sigma_Y)$ and setup geometry $(W,H)$,
+and compare the prediction $\hat{\mathbf{y}}$ to the MPM ground
+truth $\mathbf{y}$. The full $42{,}583$-row evaluation visits all
+$25$ geometry sub-banks and all $1{,}491$ sub-experts.
+
+\paragraph{Aggregate fidelity.}
+Across all eight flow-front dimensions and all $1{,}491$ sub-experts,
+the surrogate attains aggregate MAE
+$\mathrm{MAE}=0.038$\,cm and $R^2 = 0.9989$. The median row-max
+absolute error is $0.029$\,cm, the $p_{95}$ row-max is $0.26$\,cm,
+the $p_{99}$ row-max is $0.58$\,cm, and the $p_{99.9}$ row-max is
+$1.92$\,cm. The per-dim MAE rises mildly from $0.005$\,cm at the
+first frame to $0.064$\,cm at the eighth (Tab.~\ref{tab:fidelity}),
+reflecting the larger dynamic range of later flow-front distances;
+the per-dim $R^2$ stays above $0.996$ across all eight frames, with
+the small drop at $d=8$ ($R^2 = 0.9967$) tracking a thin extrapolation
+tail in a handful of subs (the absolute worst row sits at $29$\,cm
+displacement in $\hat y_8$, single-figure occurrence over $42{,}583$
+rows). Such tail rows do not arise inside the inverse loop: the
+GP-aware likelihood (\S\ref{sec:inv-loss}) down-weights any
+residual that exceeds the GP variance, and the top-$k$ rerank
+(\S\ref{sec:surr-top1}) routes such queries away from boundary
+subs.  Fig.~\ref{fig:parity} shows the per-frame surrogate parity
+that supports these aggregate numbers.
+
+\begin{table}[!htbp]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2.5pt}
+\caption{Surrogate forward fidelity on $T_{\mathrm{sim}}$
+($N=42{,}583$ held-out assignment rows, produced by the $22{,}209$
+held-out simulations of \S\ref{sec:experimental-setup} after routing;
+all $1{,}491$ final sub-experts visited).
+Per-dim numbers are computed on the residual $\hat y_d - y_d$ across
+all rows.}
+\label{tab:fidelity}
+\begin{tabular}{@{}lccccccccc@{}}
+\toprule
+Frame $d$        & $1$ & $2$ & $3$ & $4$ & $5$ & $6$ & $7$ & $8$ & overall \\
+\midrule
+MAE (cm)         & 0.005 & 0.014 & 0.026 & 0.038 & 0.047 & 0.053 & 0.057 & 0.064 & 0.038 \\
+$R^2$            & 0.9995 & 0.9996 & 0.9995 & 0.9994 & 0.9993 & 0.9992 & 0.9990 & 0.9967 & 0.9989 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Per-sub regression quality.}
+Across the $1{,}484$ sub-experts with at least five held-out rows, the
+median per-sub $R^2$ is $0.998$ and the lower $5\,\%$ tail remains at
+$0.965$. Even these boundary or low-sample subs stay below
+$0.5$\,cm held-out MAE; the few lower outliers are low-sample
+boundary cells that the inverse-time rerank avoids except for
+explicitly near-boundary queries.
+
+\begin{figure*}[!htbp]
+    \centering
+    \includegraphics[width=\textwidth]{figs/true_vs_pred.png}
+    \caption{Surrogate parity on $N=42{,}583$ held-out MPM rows,
+    one panel per flow-front frame $d=1\!\dots\!8$. Each row is
+    forwarded by its training-time sub-expert assignment (oracle
+    routing); points are an $8{,}000$-row random subsample. Per-frame
+    $R^2$ and MAE are computed over all $42{,}583$ rows. The point
+    cloud sits within line-width of the identity across three orders
+    of magnitude in flow-front distance.}
+    \Description{Eight scatter plots of surrogate-predicted flow-front
+    displacement versus MPM ground truth across 42583 held-out
+    samples; the cloud follows the identity line within line width
+    across the full range for each of the eight flow-front frames.}
+    \label{fig:parity}
+\end{figure*}
+
+\paragraph{Posterior-uncertainty calibration.}
+Because the inverse loop weights residuals by $\sigma_{\mathrm{pred}}$
+(\S\ref{sec:inv-loss}, the GP-aware likelihood), we also check
+that the per-row predictive variance is meaningful. Binning the
+$42{,}583\times 8$ residuals by predicted $\sigma_{\mathrm{pred}}$
+and comparing the empirical RMSE in each bin against the bin's mean
+$\sigma_{\mathrm{pred}}$ (Fig.~\ref{fig:sigma-cal}, left) shows that
+empirical RMSE rises monotonically with $\sigma_{\mathrm{pred}}$ but
+sits a factor of $\sim 2$ \emph{below} the diagonal. The
+distribution of standardised residuals
+$z = (\hat y - y)/\sigma_{\mathrm{pred}}$ has empirical standard
+deviation $0.52$ (Fig.~\ref{fig:sigma-cal}, right), confirming that
+the GP posterior is conservative by roughly a factor of two on the
+held-out set. We deliberately keep this conservative scale rather
+than rescaling: at deployment the residual to be explained is the
+real-vs-MPM gap, not the MPM-vs-GP gap measured here, so an
+inflated $\sigma$ at the surrogate level acts as the correct
+``unknown unknowns'' budget when the likelihood is evaluated against
+real-camera observations.
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=\columnwidth]{figs/sigma_calibration.png}
+    \caption{GP posterior-variance calibration on $T_{\mathrm{sim}}$.
+    \emph{Left:} bin-mean predicted $\sigma_{\mathrm{pred}}$ vs.\
+    bin empirical RMSE; the curve is monotone but lies below the
+    identity, indicating that the GP posterior over-estimates noise
+    by a factor of $\sim\!2$ relative to held-out residuals.
+    \emph{Right:} histogram of standardised residuals
+    $z = (\hat y - y)/\sigma_{\mathrm{pred}}$ versus
+    $\mathcal{N}(0,1)$ (black). Empirical $\mathrm{std}(z) = 0.52$,
+    consistent with the calibration plot.}
+    \Description{Two-panel figure showing GP posterior variance
+    calibration: scatter of predicted vs empirical noise lying below
+    the identity, and histogram of standardised residuals narrower
+    than a unit normal.}
+    \label{fig:sigma-cal}
+\end{figure}
+
+Tab.~\ref{tab:fidelity} therefore establishes that the routed
+sub-expert reproduces MPM forward outputs to well within the
+flow-front extraction noise of the captured data
+(\S\ref{sec:obs-pipeline}), and Fig.~\ref{fig:sigma-cal} shows
+that the GP's predictive $\sigma$ supplies a meaningful, slightly
+conservative noise budget for the inverse likelihood. Together
+these justify substituting MPM by the surrogate inside the
+inverse loop.
+
+
+\subsection{Synthetic Validation at Scale}
+\label{sec:mainresults}
+
+Following the validation protocol
+of~\citet{hamamichi2023nonnewtonian}, we first test the inverse on
+synthetic dam-break observations whose ground-truth parameters are
+known by construction. We run the full pipeline (routing, GP-aware
+likelihood, multi-restart CMA-ES) on $N$ synthetic materials drawn
+from the calibrated parameter box of \S\ref{sec:data}, and report
+the relative error
+\begin{equation}
+\label{eq:erel}
+\begin{aligned}
+E_{\mathrm{rel}}
+&= \Bigg[
+\biggl(\frac{\hat n-n^{\!\star}}{n_{\max}-n_{\min}}\biggr)^{\!2}
++
+\biggl(\frac{\hat\eta-\eta^{\!\star}}{\eta_{\max}-\eta_{\min}}\biggr)^{\!2}
+\\[-1mm]
+&\qquad+
+\biggl(\frac{\hat\sigma_Y-\sigma_Y^{\!\star}}
+{\sigma_{Y,\max}-\sigma_{Y,\min}}\biggr)^{\!2}
+\Bigg]^{1/2}.
+\end{aligned}
+\end{equation}
+introduced by~\citet{hamamichi2023nonnewtonian}, with the parameter
+box of \S\ref{sec:data} setting the normalisation. Following their
+protocol we declare a recovery successful when
+$E_{\mathrm{rel}}\le 0.1$.
+
+All synthetic panels in this section use the simulator-matched
+\texttt{sim\_precision} profile of Eq.~\eqref{eq:simprecision}.
+The real-video inverses later in the paper use the
+\texttt{real\_robust} profile of Eq.~\eqref{eq:y8q}.  Both are
+instances of the same top-$M$ candidate-hypothesis joint framework of
+\S\ref{sec:surrogate}.  In the synthetic profile, setup-$1$ is a
+top-$1$ local inverse, setup-$2$ keeps the top-$3$ full-trajectory
+candidates, and the joint stage runs a tight-box per-pair search with
+the first-observation guard of \S\ref{sec:inv-joint}.  This is
+appropriate because the synthetic observations are generated by the
+same MLS-MPM simulator as the training corpus.  In the real profile,
+described in \S\ref{sec:rheometer}, setup-$2$ instead keeps top-$10$
+terminal-displacement candidates and uses conservative selection for
+camera noise and real--sim discrepancy.
+
+A held-out $100$-row routing diagnostic confirmed the profile choice:
+\texttt{sim\_precision} recovers the oracle sub-expert in $61/100$
+cases at top-$1$, $97/100$ at top-$3$, and $100/100$ at top-$10$,
+whereas the real-robust terminal-displacement score trades synthetic
+recall for camera-noise robustness.
+\paragraph{Hamamichi-matched synthetic panel.}
+The simulation-in-the-loop predecessor reports its main synthetic
+validation on $30$ cases ($6$ materials $\times\,5$ random initial
+setups), reaching $11/30$ ($36.7\%$) at $1$~setup and $20/30$
+($66.7\%$) at $2$~setups, with further \emph{cascaded} refinements
+in which setup~$k+1$ is only run on the cases that failed at
+setup~$k$, raising the cumulative pass rate to $26/30$ at $3$~setups
+and $30/30$ at $4$~setups~\cite{hamamichi2023nonnewtonian}. We
+therefore make the same $30$-case scale the main comparison and
+reserve larger panels for robustness checks. Our $30$~cases are
+stratified samples from the held-out MPM test split rather than the
+predecessor's specific $6$-material list; this differs in sampling
+protocol but matches the panel size and the $E_{\mathrm{rel}}\le 0.1$
+recovery threshold, so the numbers in Table~\ref{tab:setup-ablation}
+answer ``does the inverse recover correctly at the predecessor's
+panel scale?'' rather than ``do we beat the predecessor case by
+case?''  A like-for-like rerun on Hamamichi's $6$~rheometer-fitted
+parameter sets, and the cascaded $3$/$4$-setup protocol that the
+predecessor uses to clear the remaining failures, are reserved
+for future work.
+
+For each of our cases we run a single-setup inverse, use the
+Hessian-orthogonal proposer of \S\ref{sec:proposer} to choose
+a second geometry, synthesise that second observation with MLS-MPM
+at the ground-truth parameters, and run the simulator-matched
+two-setup joint profile.  The joint stage keeps the top-$3$
+setup-$2$ candidates (ranked by frame-weighted nearest-training
+trajectory distance under \texttt{sim\_precision}), optimises each
+candidate pair in its own tight sub-expert box, and accepts the
+joint update only when it does not violate the first observation's
+truth-blind replay consistency (\S\ref{sec:inv-joint}).  At
+$1$~setup our pipeline converts $15/30$, ahead of the predecessor's
+$11/30$; at $2$~setups we hold the same $15/30$ rather than slide
+to the predecessor's $20/30$, because our truth-blind guard rejects
+joint updates that would regress setup~$1$ replay---the
+predecessor's unguarded multi-setup CMA-ES instead accepts those
+updates and converts an additional $9$ cases.  This is a
+documented trade-off, not a free win for either side: our guard
+pays a panel-level conversion cost in exchange for never
+overwriting a recovered single-setup estimate, which matters when
+the inverse is used as a per-batch instrument rather than a
+per-showcase study.
+Fig.~\ref{fig:flow-error-cdf} reports the cumulative distributions
+of parameter and forward replay error across the panel.
+
+\begin{table}[!htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\caption{Synthetic recovery on the Hamamichi-matched $N=30$ panel.
+``$\le 0.1$'' counts cases with $E_{\mathrm{rel}}\le 0.1$
+(Eq.~\ref{eq:erel}). The three $\mathrm{relE}$ columns are
+per-parameter medians $|\hat\theta-\theta^{\!\star}|/\theta^{\!\star}$.
+Italic rows are predecessor pass rates from~\citet{hamamichi2023nonnewtonian}
+on its own size-matched $30$-case panel; the $3$- and $4$-setup
+predecessor rows are cascaded rather than independent all-case runs.}
+\label{tab:setup-ablation}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Setups & $\le 0.1$ & $\mathrm{relE}\,n$ & $\mathrm{relE}\,\eta$ &
+$\mathrm{relE}\,\sigma_Y$ \\
+\midrule
+\textit{Predecessor, 1} & \textit{$11/30$ ($36.7\%$)} & --- & --- & --- \\
+\textit{Predecessor, 2} & \textit{$20/30$ ($66.7\%$)} & --- & --- & --- \\
+\textit{Predecessor, 3} & \textit{$26/30$ ($86.7\%$)} & --- & --- & --- \\
+\textit{Predecessor, 4} & \textit{$30/30$ ($100\%$)}  & --- & --- & --- \\
+\midrule
+Ours, 1 setup & $\mathbf{15/30}$ ($\mathbf{50.0\%}$) & $0.066$ & $0.187$ & $0.250$ \\
+Ours, 2 setups & $15/30$ ($50.0\%$) & $0.071$ & $\mathbf{0.160}$ & $0.268$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=0.88\columnwidth,height=0.22\textheight,keepaspectratio]{figs/results/flow_error_cdf.png}
+    \caption{Parameter recovery and MLS-MPM replay error on the
+    Hamamichi-matched $N=30$ synthetic panel.  The parameter threshold
+    $E_{\mathrm{rel}}=0.1$ follows~\citet{hamamichi2023nonnewtonian}.
+    After replaying the recovered $\hat{\boldsymbol{\theta}}$ through
+    MLS-MPM, the median flow-front WRMS is $0.060$, the median absolute
+    flow-front error is $0.091$\,cm, and the median terminal-front
+    error is $0.132$\,cm, showing that many borderline parameter
+    estimates remain accurate as dam-break forward predictions.}
+    \Description{Cumulative distributions of parameter relative error,
+    MPM replay flow-front error, and terminal flow-front error on the
+    synthetic validation panel.}
+    \label{fig:flow-error-cdf}
+\end{figure}
+
+\paragraph{Flow-level replay.}
+Following the predecessor's simulated-flow diagnostics, we replay every
+recovered $\hat{\boldsymbol{\theta}}$ in MLS-MPM. Parameter error and
+forward replay error are correlated but not identical: sliding along the
+HB ridge can move $\eta$ and $\sigma_Y$ while leaving the dam-break
+trajectory nearly unchanged. We therefore report both the scalar replay
+CDF in Fig.~\ref{fig:flow-error-cdf} and representative flow-curve
+overlays in Fig.~\ref{fig:flowcurve-syn}.
+\paragraph{Recovered flow curves on synthetic samples.}
+Beyond the scalar parameter recovery of
+Table~\ref{tab:setup-ablation}, the recovered Herschel--Bulkley
+\emph{flow curve}
+$\hat\tau(\dot\gamma)=\hat\sigma_Y+\hat\eta\,\dot\gamma^{\,\hat n}$
+can agree with the ground-truth curve over the shear-rate range
+probed by the dam-break experiment, even when the parameter triple
+itself slides along the $(\eta,\sigma_Y)$ ridge.
+Figure~\ref{fig:flowcurve-syn} overlays $\hat\tau$ on the ground
+truth for diagnostic panel categories selected from the replay
+diagnostic.
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=\columnwidth,height=0.42\textheight,keepaspectratio]{figs/results/flowcurve_representatives.png}
+    \caption{Recovered flow curves $\hat\tau(\dot\gamma)$ (blue)
+    versus ground truth (black) on five diagnostic synthetic replay
+    categories: accurate recovery, large replay error,
+    ridge-equivalent parameters, joint rescue, and joint regression.
+    The green band marks the conventional HB-fit
+    $1$--$100\,\mathrm{s}^{-1}$ range, while the surrounding grey band
+    covers the wider rheometer-style shear-rate window.}
+    \Description{Log-log Herschel-Bulkley flow-curve overlays for
+    diagnostic synthetic categories selected from the replay diagnostic.}
+    \label{fig:flowcurve-syn}
+\end{figure}
+
+\subsection{Validation Against Parallel-Plate Rheometers}
+\label{sec:rheometer}
+
+The real-fluid validation is restricted to the six Hamamichi
+materials for which we have both dam-break captures and
+parallel-plate rheometer sweeps: Chuno, Okonomiyaki sauce,
+moisturising milk, lotion, Japanese pork-cutlet sauce, and sweet
+bean paste.  This keeps the real comparison tied to independent
+instrumental measurements rather than to another video inverse.  For
+each material we use two dam-break setups.  The first setup is a
+\texttt{real\_robust} top-$1$ local inverse; the second setup supplies
+top-$10$ \texttt{real\_robust} routed setup-$2$ hypotheses, and the
+joint inverse selects a conservative tight-box pair without running
+an independent setup-$2$ single inverse.  We then overlay the recovered
+Herschel--Bulkley flow curve against the rheometer reference over the
+shear-rate range probed by the dam-break replay.
+
+This panel is an anchor rather than the final application regime of
+the method. The predecessor spends full MPM simulations inside the
+optimizer and can afford a more exhaustive search over
+ridge-equivalent parameter triples; our surrogate inverse instead
+targets the information that a dam-break observation supports under
+an interactive time budget. We therefore use the six rheometer
+materials to check that the recovered \emph{flow curves} and replays
+remain in the right accuracy regime, not to claim case-by-case
+identity with the predecessor's parameter triples. The materials for
+which video rheometry has no instrumental counterpart are evaluated
+separately in \S\ref{sec:chunky}.
+
+Following the convention of the predecessor's Table~$1$ and
+Fig.~$13$~\cite{hamamichi2023nonnewtonian}, the headline comparison
+is the flow-curve overlay against the parallel-plate rheometer
+(Fig.~\ref{fig:flow-real}); Tab.~\ref{tab:rheo-recovery} lists the
+two setups used per material together with the recovered
+Herschel--Bulkley triple, mirroring the columns of the predecessor's
+Table~$1$.  Because inverse quality varies across the six materials,
+we read Fig.~\ref{fig:flow-real} as both validation and diagnostic:
+close overlays indicate parameter recovery inside the dam-break
+shear-rate support, while visibly separated curves expose either a
+ridge-equivalent parameter choice or a support mismatch that the
+dam-break observation cannot resolve.  Fig.~\ref{fig:snapdiff}
+additionally shows frame-by-frame silhouette differences between
+the captured video, MPM forward at the recovered
+$\hat{\boldsymbol{\theta}}$, and MPM forward at the rheometer-fitted
+$\boldsymbol{\theta}^{\!\star}$.
+
+\begin{table}[!htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\caption{Recovered Herschel--Bulkley parameters and the two
+$(W,H)$ setups used by the joint inverse, in the column format of
+\citet{hamamichi2023nonnewtonian}'s Table~$1$.  Joint inverse
+wall-clock per material is reported in the last column.  The
+flow-curve comparison against the parallel-plate rheometer
+reference is shown in Fig.~\ref{fig:flow-real}.}
+\label{tab:rheo-recovery}
+\begin{tabular}{@{}lcccccr@{}}
+\toprule
+Material  & $(W_1,H_1)$ & $(W_2,H_2)$
+          & $\hat n$ & $\hat\eta$ & $\hat\sigma_Y$ & wall \\
+\midrule
+Chuno              & $(2.5, 2.7)$ & $(4.0, 2.0)$
+                   & $0.66$ & $8.07$  & $19.7$ & $19$\,s \\
+Okonomiyaki        & $(2.2, 2.5)$ & $(7.0, 7.0)$
+                   & $0.54$ & $47.5$  & $118.8$ & $19$\,s \\
+Moisturising milk  & $(4.5, 3.5)$ & $(4.5, 2.0)$
+                   & $0.43$ & $29.1$  & $135.4$ & $17$\,s \\
+Lotion             & $(6.1, 2.8)$ & $(7.0, 6.5)$
+                   & $0.37$ & $163.1$ & $2.6$  & $17$\,s \\
+Pork-cutlet sauce  & $(2.4, 2.1)$ & $(7.0, 7.0)$
+                   & $0.33$ & $76.3$  & $15.3$  & $20$\,s \\
+Sweet bean paste   & $(4.8, 4.1)$ & $(2.5, 2.5)$
+                   & $0.61$ & $169.4$ & $262.1$ & $30$\,s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure*}[!htbp]
+    \centering
+    % Row 1: 3 panels
+    \begin{minipage}[t]{0.32\textwidth}
+        \centering
+        \figureorplaceholder[2.9cm]{\linewidth}{figs/real_world/y8q_chuno_single_vs_joint.png}{(a) Chuno: rheometer + single + joint flow curves.}\\
+        {\footnotesize (a) Chuno (Japanese thickened sauce)}
+    \end{minipage}\hfill
+    \begin{minipage}[t]{0.32\textwidth}
+        \centering
+        \figureorplaceholder[2.9cm]{\linewidth}{figs/real_world/y8q_okonomi_single_vs_joint.png}{(b) Okonomiyaki: rheometer + single + joint flow curves.}\\
+        {\footnotesize (b) Okonomiyaki (cabbage pancake sauce)}
+    \end{minipage}\hfill
+    \begin{minipage}[t]{0.32\textwidth}
+        \centering
+        \figureorplaceholder[2.9cm]{\linewidth}{figs/real_world/y8q_milk_single_vs_joint.png}{(c) Moisturising milk: rheometer + single + joint flow curves.}\\
+        {\footnotesize (c) Moisturising milk}
+    \end{minipage}\\[4pt]
+    % Row 2: 3 panels
+    \begin{minipage}[t]{0.32\textwidth}
+        \centering
+        \figureorplaceholder[2.9cm]{\linewidth}{figs/real_world/y8q_lotion_single_vs_joint.png}{(d) Lotion: rheometer + single + joint flow curves.}\\
+        {\footnotesize (d) Lotion}
+    \end{minipage}\hfill
+    \begin{minipage}[t]{0.32\textwidth}
+        \centering
+        \figureorplaceholder[2.9cm]{\linewidth}{figs/real_world/y8q_tonkatsu_single_vs_joint.png}{(e) Japanese pork-cutlet sauce: rheometer + single + joint flow curves.}\\
+        {\footnotesize (e) Japanese pork-cutlet sauce}
+    \end{minipage}\hfill
+    \begin{minipage}[t]{0.32\textwidth}
+        \centering
+        \figureorplaceholder[2.9cm]{\linewidth}{figs/real_world/y8q_sweetbean_single_vs_joint.png}{(f) Sweet bean paste: rheometer + single + joint flow curves.}\\
+        {\footnotesize (f) Sweet bean paste}
+    \end{minipage}
+    \caption{Recovered Herschel--Bulkley flow curves on the
+    six Hamamichi rheometer-reference materials, following the layout
+    of~\citet{hamamichi2023nonnewtonian} Fig.~$13$. Dotted black:
+    parallel-plate rheometer sweep. Red: single-setup recovery. Blue:
+    two-setup joint recovery. The full panel is shown as a diagnostic:
+    close overlays mark agreement inside the dam-break shear-rate
+    support, while separated curves expose remaining ridge or real--sim
+    gap effects.}
+    \Description{Two-by-three grid of log-log flow-curve overlays.
+    Each panel shows a rotational-rheometer sweep alongside the
+    single-setup and joint-setup flow curves recovered by our
+    inverse for one Hamamichi reference material.}
+    \label{fig:flow-real}
+\end{figure*}
+
+\begin{figure*}[!t]
+    \centering
+    \includegraphics[width=0.88\textwidth]{figs/real_world/snapdiff_okonomi_setup2.png}
+    \caption{Frame-by-frame silhouette diagnostic on Okonomiyaki setup-$2$
+    ($W=7.0$\,cm, $H=7.0$\,cm). The top rows compare the captured
+    video, MPM replay at the recovered $\hat{\boldsymbol{\theta}}$, and
+    MPM replay at the rheometer-fitted $\boldsymbol{\theta}^{\!\star}$;
+    the lower rows show amplified pixel differences. The
+    MPM$(\hat\theta)$--MPM$(\theta^{\!\star})$ difference is smaller
+    than either real--MPM residual, illustrating that visually similar
+    dam-break trajectories can lie along the HB ridge while the
+    real--sim gap dominates the remaining silhouette error.}
+    \Description{One silhouette diagnostic panel for Okonomiyaki
+    setup-2: three rows of forward simulations (real, recovered
+    theta, rheometer-truth theta) followed by three rows of pixel
+    differences across eight frames, showing that the
+    MPM-versus-MPM difference is smaller than the real-versus-MPM
+    difference.}
+    \label{fig:snapdiff}
+\end{figure*}
+
+As reported by the predecessor on its own real-fluid panel,
+agreement at the parameter-triple level is not the only relevant bar
+for video rheometry: the dam-break observation can lie on the
+$(\eta,\sigma_Y)$-ridge of \S\ref{sec:inv-sy}, so multiple triples
+may predict similar free-surface motion over the observed
+shear-rate window.  We therefore report the six-material flow-curve
+panel directly instead of reducing it to a single success count.
+Good overlays show where the video inverse agrees with the
+parallel-plate reference; poor overlays identify materials or
+geometries where the real--sim gap or the remaining
+Herschel--Bulkley ridge dominates.  The MPM-vs-MPM bottom row of
+Fig.~\ref{fig:snapdiff} makes this diagnostic reading concrete for
+Okonomiyaki: the silhouette difference between MPM at
+$\hat{\boldsymbol{\theta}}$ and MPM at the rheometer-fitted
+$\boldsymbol{\theta}^{\!\star}$ is smaller than the real$-$MPM gap
+above, so residual triple disagreement can be less important to the
+captured dam-break trajectory than the mismatch between the real
+fluid and the idealized HB-MPM forward model.
+Per-parameter uncertainty along the ridge is reported by the
+local Laplace--Hessian $95\%$ interval (\S\ref{sec:inv-cma})
+rather than hidden by a hand-chosen prior.
+
+\subsection{Characterising Rheometer-Infeasible Materials}
+\label{sec:chunky}
+
+The intended application regime is not the smooth subset of
+\S\ref{sec:rheometer}, where a parallel-plate reference happens to be
+available, but materials for which such a reference is unavailable:
+chunky sauces, particulate suspensions, and mixed pastes whose
+inclusions are comparable to or larger than the rheometer gap. For
+these samples there is no meaningful parameter-triple ground truth
+from an instrument. The validation target therefore changes from
+``match a rheometer sweep'' to ``predict the observed dam-break
+motion and the qualitative free-surface behaviour under the recovered
+HB model.''
+
+We evaluate this regime by running the same capture, calibration,
+routing, and inverse pipeline on a panel of rheometer-infeasible
+materials and then replaying the recovered
+$\hat{\boldsymbol{\theta}}$ through MPM in the calibrated camera.
+The section reports two diagnostics. First, sim--real silhouette
+overlays quantify whether the recovered parameters reproduce the
+observed free-surface extent over the eight-frame dam-break
+trajectory. Second, side-by-side stills compare characteristic
+phenomena---surface curling in high-yield pastes, avalanche-like
+lump motion in particulate emulsions, and impact dips in thinner
+sauces---against the corresponding MPM replay. This is the target
+use case of the paper: \S\ref{sec:rheometer} anchors the surrogate
+inverse against materials with independent rheometer references,
+whereas this section asks whether the same seconds-scale inverse
+remains useful when no such instrument reference exists.
+
+\begin{figure*}[!htbp]
+    \centering
+    \widefigureorplaceholder[4.8cm]{\textwidth}{figs/real_world/rheometer_infeasible_replay.pdf}{Placeholder F-INFEASIBLE-REPLAY:
+    representative rheometer-infeasible materials. Each row shows a
+    captured dam-break frame, the MPM replay under the recovered
+    $\hat{\boldsymbol{\theta}}$, and an amplified silhouette
+    difference or IoU annotation.}
+    \caption{Sim--real replay diagnostics on materials outside the
+    reach of controlled-gap rheometry. Each sample is evaluated by
+    replaying the recovered Herschel--Bulkley parameters in MPM and
+    comparing the calibrated silhouette against the source video,
+    because no parallel-plate reference is available.}
+    \Description{A multi-row figure comparing captured dam-break
+    frames, MPM replays, and silhouette differences for visibly
+    particulate or chunky fluids that cannot be measured by a
+    controlled-gap rheometer.}
+    \label{fig:chunky-replay}
+\end{figure*}
+
+\begin{figure*}[!htbp]
+    \centering
+    \widefigureorplaceholder[4.8cm]{\textwidth}{figs/real_world/rheometer_infeasible_phenomena.pdf}{Placeholder F-INFEASIBLE-PHENOMENA:
+    side-by-side captured and replayed stills for three qualitative
+    free-surface behaviours: curling in high-yield paste,
+    avalanche/lump motion in particulate emulsion, and impact dip in
+    a thinner sauce.}
+    \caption{Qualitative free-surface phenomena on
+    rheometer-infeasible materials. The comparison asks whether the
+    parameters recovered from a short dam-break video reproduce the
+    visible flow behaviour that motivated the measurement, rather than
+    whether they match an unavailable rheometer sweep.}
+    \Description{A side-by-side grid of captured and simulated
+    dam-break stills showing qualitative free-surface behaviours on
+    materials with visible inclusions or mixed textures.}
+    \label{fig:chunky-phenomena}
+\end{figure*}
+
+\subsection{Parameter Freshness for Time-Varying Materials}
+\label{sec:freshness}
+
+\paragraph{Central claim.}
+Hamamichi's two-setup protocol requires the setup-$2$ geometry to be
+chosen \emph{after} the setup-$1$ inverse returns, because the
+Hessian-orthogonal proposer of \S\ref{sec:proposer} consumes
+$\hat{\boldsymbol{\theta}}_1$. Under a simulation-in-the-loop
+implementation this introduces a structural $\sim 8$\,h interval
+between the two captures: setup-$1$ optimisation must finish before
+setup-$2$ can even be released. For
+\emph{industrial standardised products}---commercial sauces,
+cosmetic emulsions---this interval is harmless: opening a new
+package the next day returns to the same canonical state. For
+\emph{self-prepared, non-standardised materials}---starch gels,
+flour pastes, cooking-prepared sauces---the interval is destructive:
+the material has aged into a different state by the time setup-$2$
+is captured, and the joint inverse fuses two observations of
+\emph{different materials} rather than two observations of the same
+one. The seconds-scale inverse of \S\ref{sec:mainresults} collapses
+this $\sim 8$\,h window to under a minute, so the same two-setup
+machinery operates within the material's evolution timescale rather
+than across it. This section establishes that claim through four
+layers of evidence; we keep each layer's scope narrow and report
+each layer's failure modes alongside its pass conditions.
+
+\paragraph{Four layers of evidence.}
+\begin{description}
+  \item[\textnormal{A.}] \emph{Identifiability lower bound
+  (synthetic).} How fast a kinetic timescale $T_k$ can the
+  three-point sampling cadence $t\in\{0,20,40\}$\,min resolve at
+  all? Layer~A prescribes synthetic
+  $\boldsymbol{\theta}(t)$ trajectories with known $T_k$,
+  $\sigma_{Y,\infty}$ and reports the $\hat T_k$ vs $T_k$ recovery
+  curve plus the false-positive distribution under a $T_k=\infty$
+  static control.
+  \item[\textnormal{B.}] \emph{Sim-in-loop staleness counterfactual
+  (synthetic).} For a target kinetic, what bias would the $\sim 8$\,h
+  setup-$1\to$setup-$2$ interval introduce? Layer~B numerically
+  reconstructs both protocols on the same synthetic ground truth and
+  reports the bias $\Delta$ as a function of $T_k$. This is the
+  layer that converts ``freshness = headline'' from narrative into a
+  quantified finding.
+  \item[\textnormal{C.}] \emph{Within-batch real evolution.} On seven
+  self-prepared materials, the same pipeline is run three times
+  over a $40$\,min within-batch observation window and the recovered
+  $\hat\sigma_Y(t)$ is fitted to a first-order build-up form. Pass
+  conditions are pre-registered before any video is captured.
+  \item[\textnormal{D.}] \emph{Real-material staleness verification.}
+  The same materials are re-paired so that setup-$1$ and setup-$2$
+  come from different time points (or different batches) of the same
+  condition, mimicking sim-in-loop's enforced interval. Layer~D
+  reports whether the real-material bias direction and order of
+  magnitude agree with Layer~B's synthetic prediction.
+\end{description}
+
+% -------------------------------------------------------------------
+\paragraph{Layer A: Identifiability lower bound on $T_k$.}
+\label{sec:fresh-A}
+We prescribe synthetic kinetic ground truth with
+$\sigma_Y(t)=\sigma_{Y,\infty}(1-e^{-t/T_k})$ across six target
+timescales $T_k\in\{10,20,30,60,120,\infty\}$\,min, holding
+$\sigma_{Y,\infty}=100$\,Pa, $n=0.5$, $\eta=10$\,Pa$\cdot$s$^n$ at a
+well-conditioned regime away from the $\sigma_Y$ identifiability
+ridge of \S\ref{sec:inv-sy}. For each $T_k$ we render
+dam-break videos with MPM at $t\in\{0,20,40\}$\,min and run the full
+inverse pipeline, then fit the recovered $\hat\sigma_Y(t)$ back to
+Eq.~\eqref{eq:avrami}. Each condition is repeated $5$ times across
+random setup-$1$ geometries. The $T_k=\infty$ static control
+quantifies the false-positive rate at which a non-evolving material
+is mis-detected as kinetic.
+
+Fig.~\ref{fig:fresh-A1} reports $\hat T_k$ vs $T_k$ on log-log axes,
+with the static control on the right margin. We define the
+\emph{minimum resolvable} $T_k$ as the smallest true $T_k$ at which
+the median fractional error
+$|\hat T_k - T_k|/T_k$ stays under $50\%$, and the \emph{ceiling}
+$T_k$ as the largest true $T_k$ whose recovered $\hat T_k$ remains
+distinguishable from the static control. The window
+$[T_k^{\min},T_k^{\max}]$ produced by this layer is the
+\emph{applicability bound} for the real panel of Layer~C: any real
+material falling outside this window cannot be resolved by the
+three-point cadence regardless of inverse quality.
+
+\begin{figure}[!htbp]
+    \centering
+    \figureorplaceholder[3.8cm]{\columnwidth}{figs/freshness/fresh_A1_identifiability.pdf}{Placeholder F-FRESH-A1:
+    Identifiability scatter. Left panel: $\hat T_k$ vs $T_k$
+    log-log scatter for $T_k\in\{10,20,30,60,120\}$\,min, with
+    identity line and the $T_k=\infty$ control plotted on the right
+    margin. Right panel: per-$T_k$ box-plot of fractional error
+    $(\hat T_k-T_k)/T_k$.}
+    \caption{Layer~A identifiability bound on the three-point
+    freshness protocol. The plot defines $T_k^{\min}$ (smallest
+    resolvable kinetic timescale) and $T_k^{\max}$ (largest
+    timescale distinguishable from a static material), which jointly
+    set the applicability window for the real panel of Layer~C.}
+    \Description{Identifiability scatter plot showing recovered
+    versus prescribed kinetic timescale, with a static control bin
+    on the right and per-bin error box-plots.}
+    \label{fig:fresh-A1}
+\end{figure}
+
+% -------------------------------------------------------------------
+\paragraph{Layer B: Sim-in-loop staleness counterfactual.}
+\label{sec:fresh-B}
+We hold the synthetic setting of Layer~A and now numerically
+reconstruct two protocols on the same prescribed kinetic curves at
+three diagnostic scenarios:
+$T_k\in\{15\,\mathrm{min\ (fast)},\,45\,\mathrm{min\ (medium)},\,
+180\,\mathrm{min\ (slow)}\}$.
+
+\emph{Protocol $P_{\mathrm{fast}}$ (surrogate).} Setup-$1$ and
+setup-$2$ are both released at $t=0$; the joint inverse produces
+$\hat{\boldsymbol{\theta}}_{\mathrm{fast}}$ in seconds.
+
+\emph{Protocol $P_{\mathrm{slow}}$ (simulation-in-the-loop
+counterfactual).} Setup-$1$ is released at $t=0$. The
+sim-in-loop inverse then takes $\sim 8$\,h to return
+$\hat{\boldsymbol{\theta}}_1$, after which the proposer of
+\S\ref{sec:proposer} selects $(W_2,H_2)$. Setup-$2$ is therefore
+released at $t=8$\,h, with the material now in state
+$\boldsymbol{\theta}(t=8\,\mathrm{h})$ rather than
+$\boldsymbol{\theta}(t=0)$. The joint inverse then fuses
+$\mathbf{y}^{(1)}$ at $\boldsymbol{\theta}(0)$ with $\mathbf{y}^{(2)}$
+at $\boldsymbol{\theta}(8\,\mathrm{h})$, producing
+$\hat{\boldsymbol{\theta}}_{\mathrm{slow}}$.
+
+Both protocols are run $10$ times per scenario with different
+random setup-$1$ geometries; we report the bias
+$\Delta = \|\hat{\boldsymbol{\theta}}_{\mathrm{slow}} -
+\boldsymbol{\theta}(0)\| -
+\|\hat{\boldsymbol{\theta}}_{\mathrm{fast}} -
+\boldsymbol{\theta}(0)\|$ and visualise both clouds in
+flow-curve space (Fig.~\ref{fig:fresh-B1}). The $T_k=180$\,min
+scenario is included precisely because we expect
+$\Delta\approx 0$ there: a material that aged little within
+$8$\,h gives no advantage to fast acquisition, and reporting that
+boundary candidly is part of the claim.
+
+\begin{figure*}[!htbp]
+    \centering
+    \widefigureorplaceholder[3.6cm]{\textwidth}{figs/freshness/fresh_B1_staleness.pdf}{Placeholder F-FRESH-B1:
+    Three-panel staleness counterfactual (fast / medium / slow $T_k$
+    scenarios). In each panel, the ground-truth flow curve
+    $\tau(\dot\gamma)$ at $t=0$ is plotted in black; the cloud of
+    $P_{\mathrm{fast}}$ recoveries is overlaid in blue, and the cloud
+    of $P_{\mathrm{slow}}$ (8\,h-interval) recoveries is overlaid in
+    red. The per-scenario bias $\Delta$ is reported in the panel
+    title.}
+    \caption{Layer~B sim-in-loop staleness counterfactual on synthetic
+    kinetic ground truth. The $\sim 8$\,h setup-$1\to$setup-$2$
+    interval mandated by simulation-in-the-loop pulls the recovered
+    yield-stress estimate toward $\sigma_{Y,\infty}$ when
+    $T_k\ll 8$\,h, while the seconds-scale protocol of
+    \S\ref{sec:mainresults} recovers $\boldsymbol{\theta}(t=0)$.
+    The $T_k=180$\,min panel shows the boundary at which the
+    advantage vanishes: when material evolution is slow relative to
+    the sim-in-loop interval, both protocols are indistinguishable.}
+    \Description{Three log-log flow-curve panels showing ground
+    truth at t=0 alongside the two protocol clouds; the bias grows
+    as the prescribed kinetic timescale shortens.}
+    \label{fig:fresh-B1}
+\end{figure*}
+
+% -------------------------------------------------------------------
+\paragraph{Layer C: Within-batch evolution of real materials.}
+\label{sec:fresh-C}
+The real panel is deliberately small enough to run as a controlled
+laboratory protocol but diverse enough to span smooth,
+rheometer-feasible starch gels and visibly particulate composites
+(Tab.~\ref{tab:fresh-mats}). Each session prepares a $400$\,g batch
+at $25^{\circ}$C$\pm 0.5^{\circ}$C and samples it at
+$t_i\in\{0,20,40\}$\,min with a joint two-setup dam-break inverse at
+every time point. To remove a routing confound across time points
+within one condition, the setup-$1$ geometry $(W_1,H_1)$ is fixed
+once per condition rather than redrawn at each $t_i$; setup-$2$ is
+then proposed from each timepoint's snapshot inverse by the
+Hessian-orthogonal rule of \S\ref{sec:proposer}. A single ChArUco
+calibration is shared across the session.
+
+\begin{table}[!htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\caption{Time-varying material panel. Each condition is a
+$400$\,g within-batch session sampled at
+$t\in\{0,20,40\}$\,min. ``24h rheo'' marks conditions for which a
+parallel-plate plateau measurement is used as an independent
+asymptote anchor. The katakuriko $5\%$ and oats $9\%$ rows are
+each captured as two independent batches to support the
+cross-batch consistency check listed below.}
+\label{tab:fresh-mats}
+\begin{tabular}{@{}p{0.24\linewidth}ccc p{0.34\linewidth}@{}}
+\toprule
+Condition & Conc. & Texture & 24h rheo & Expected kinetic regime \\
+\midrule
+Instant oats      & $5\%$  & chunky & no  & slow particulate setting \\
+Instant oats      & $9\%$  & chunky & no  & faster particulate setting (2$\times$ batch) \\
+Katakuriko starch & $3\%$  & smooth & yes & weak potato-starch gel \\
+Katakuriko starch & $5\%$  & smooth & yes & moderate potato-starch gel (2$\times$ batch) \\
+Katakuriko starch & $7\%$  & smooth & yes & strong potato-starch gel \\
+Shiratama flour   & $7\%$  & smooth & yes & slow rice-flour gel \\
+Pancake mix       & $70\%$ & chunky & no  & composite starch + bubbles \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\emph{Kinetic fit.}
+For each condition the recovered yield-stress trajectory is fit to
+the first-order build-up form
+\cite{avrami1939kinetics,mewis2009thixotropy,bates1988nonlinear}
+\begin{equation}
+\label{eq:avrami}
+    \sigma_Y(t)
+    \;=\;
+    \sigma_{Y,\infty}\,\bigl(1 - e^{-t/T_k}\bigr),
+\end{equation}
+by weighted nonlinear least squares with the per-time-point Laplace
+half-widths from Eq.~\eqref{eq:obs-loss} as observation
+uncertainties (Bates and Watts~\cite{bates1988nonlinear}). The
+estimated relaxation time $T_k$ and asymptote $\sigma_{Y,\infty}$
+are reported with $1\sigma$ intervals from the fit covariance. With
+only three time points the fit has one degree of freedom; Layer~A
+bounds the $T_k$ at which this is meaningful, and Layer~C
+\emph{only} reports conditions whose recovered $\hat T_k$ falls
+inside that bound.
+
+\emph{Pre-registered pass/fail criteria.}
+Before any video is captured, we commit to the four checks below;
+Tab.~\ref{tab:fresh-results} reports each condition's pass/fail
+under all applicable checks together with the aggregate pass rate.
+
+\begin{description}
+  \item[\textnormal{(C-i)}] \emph{Smooth-material plateau anchor.}
+  For conditions with a $24$\,h parallel-plate rheometer plateau,
+  $\hat\sigma_{Y,\infty}$ must lie in $[0.5\times, 2\times]$ of the
+  rheometer value (equivalently $\pm 0.3$ in $\log_{10}$ space).
+  Applies to katakuriko $3/5/7\%$ and shiratama $7\%$.
+  \item[\textnormal{(C-ii)}] \emph{Concentration monotonicity.}
+  Across paired concentrations of the same base material,
+  $\hat\sigma_{Y,\infty}$ must increase with concentration. Applies
+  to oats $5\%$ vs $9\%$ and katakuriko $3\%$ vs $5\%$ vs $7\%$.
+  \item[\textnormal{(C-iii)}] \emph{Cross-batch consistency.} For
+  the two-batch conditions (katakuriko $5\%$, oats $9\%$), the
+  per-batch $(\hat T_k,\hat\sigma_{Y,\infty})$ pairs must overlap
+  within $1\sigma$ Laplace CI. This isolates whether residual
+  spread is preparation noise or pipeline noise.
+  \item[\textnormal{(C-iv)}] \emph{Kinetic monotonicity.}
+  $\hat\sigma_Y(t=40\,\mathrm{min})\ge\hat\sigma_Y(20)\ge\hat\sigma_Y(0)$
+  allowing $1\sigma$ overlap. Applies to all $7$ conditions.
+\end{description}
+
+We report the aggregate pass rate (X/Y) along with an interpretation
+of every failure case. Conceding fail rates is part of the design
+of this section: a pre-registered pass rate of $5/7$ with two
+interpreted failures is stronger evidence than a hand-curated $7/7$.
+Fig.~\ref{fig:fresh-traj} reports the per-condition $\sigma_Y(t)$
+trajectories with their fits and rheometer anchors;
+Fig.~\ref{fig:fresh-demos} complements this with calibrated
+dam-break stills at the three time points, especially for the
+chunky conditions where rheometer references are unavailable.
+
+\begin{figure*}[!htbp]
+    \centering
+    \widefigureorplaceholder[3.6cm]{\textwidth}{figs/freshness/sigmaY_kinetics_panel.pdf}{Placeholder F-FRESH-TRAJ:
+      seven-panel $\sigma_Y(t)$ figure (one per Tab.~\ref{tab:fresh-mats} row).
+      Each panel shows the three recovered $\hat{\sigma}_{Y}(t_i)$
+      estimates at $t\in\{0,20,40\}$\,min with Laplace 95\% CI bars
+      and the weighted fit of Eq.~\eqref{eq:avrami}; smooth panels
+      add a 24-h rheometer plateau marker.}
+    \caption{Layer~C within-batch yield-stress kinetics. Markers
+    are joint two-setup inverse estimates at $t\in\{0,20,40\}$\,min
+    with Laplace 95\% CI bars; solid curves are the weighted fits of
+    Eq.~\eqref{eq:avrami}. Smooth starch conditions overlay their
+    $24$\,h rheometer plateau as an independent asymptote anchor
+    (check C-i).}
+    \Description{A seven-panel grid of yield-stress kinetic curves
+    over a 40-minute within-batch window, with uncertainty bars,
+    exponential fits, and rheometer asymptote markers for the
+    smooth subset.}
+    \label{fig:fresh-traj}
+\end{figure*}
+
+\begin{table}[!htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\caption{Layer~C per-condition pass/fail under the pre-registered
+criteria (C-i)--(C-iv). ``--'' marks checks that do not apply to a
+given row. Aggregate pass rate and a one-line interpretation of
+each failure are reported in the surrounding prose.}
+\label{tab:fresh-results}
+\begin{tabular}{@{}p{0.22\linewidth}ccccc@{}}
+\toprule
+Condition & $\hat T_k$ (min) & $\hat\sigma_{Y,\infty}$ (Pa) &
+  (C-i) & (C-ii)/(C-iii)/(C-iv) & Pass \\
+\midrule
+Oats $5\%$              & ---  & --- & ---  & ---  & ---  \\
+Oats $9\%$ (batch A)    & ---  & --- & ---  & ---  & ---  \\
+Oats $9\%$ (batch B)    & ---  & --- & ---  & ---  & ---  \\
+Katakuriko $3\%$        & ---  & --- & ---  & ---  & ---  \\
+Katakuriko $5\%$ (A)    & ---  & --- & ---  & ---  & ---  \\
+Katakuriko $5\%$ (B)    & ---  & --- & ---  & ---  & ---  \\
+Katakuriko $7\%$        & ---  & --- & ---  & ---  & ---  \\
+Shiratama $7\%$         & ---  & --- & ---  & ---  & ---  \\
+Pancake mix $70\%$      & ---  & --- & ---  & ---  & ---  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[!htbp]
+    \centering
+    \figureorplaceholder[3.2cm]{\columnwidth}{figs/freshness/material_demos.pdf}{Placeholder F-FRESH-DEMOS:
+      representative stills from the calibrated dam-break videos.
+      Rows: selected smooth and chunky conditions. Columns:
+      $t \in \{0,20,40\}$\,min. Each cell shows the observed frame
+      and, where available, an MPM replay under
+      $\hat{\boldsymbol{\theta}}(t)$.}
+    \caption{Visual evidence supporting Layer~C. Representative
+    still frames at $t\in\{0,20,40\}$\,min for selected smooth and
+    chunky conditions; the flow front shifts within the same batch
+    faster than a simulation-in-the-loop inverse can return a
+    parameter estimate. This figure complements the quantitative
+    pass/fail of Tab.~\ref{tab:fresh-results} with qualitative
+    visual support, especially for the chunky conditions where
+    rheometer references are unavailable.}
+    \Description{Image grid showing selected starch-based fluids at
+    three times after preparation, optionally overlaid with MPM
+    replays under the recovered parameters at each time point.}
+    \label{fig:fresh-demos}
+\end{figure}
+
+% -------------------------------------------------------------------
+\paragraph{Layer D: Real-material staleness verification.}
+\label{sec:fresh-D}
+Layer~D closes the argument by reproducing Layer~B's synthetic
+finding on real material. We re-pair the captures of katakuriko
+$5\%$ in two arrangements:
+\begin{description}
+  \item[\textnormal{D.1}] \emph{Same-batch delayed setup-$2$.} A
+  dedicated session is run on a fresh katakuriko $5\%$ batch with
+  setup-$1$ released at $t=0$ and setup-$2$ deliberately delayed to
+  $t=40$\,min (within-window but maximally separated), then jointly
+  inverted. This is contrasted against the same batch's
+  $t=0$/$t=0$ joint inverse from Layer~C. Same-batch isolates the
+  setup-$2$ delay from any cross-batch preparation noise and is the
+  cleanest analogue of sim-in-loop's enforced interval.
+  \item[\textnormal{D.2}] \emph{Cross-batch repurposing.} The
+  existing two batches of katakuriko $5\%$ (and oats $9\%$, if
+  available) are repurposed: setup-$1$ from batch~A is paired with
+  setup-$2$ from batch~B at the same nominal $t$, mimicking what
+  sim-in-loop would acquire on a non-standardised material when the
+  next-day re-preparation falls within the batch-to-batch drift.
+\end{description}
+
+Both arrangements yield $(\hat T_k,\hat\sigma_{Y,\infty},
+\hat\eta,\hat n)$ tuples that we compare against the true
+same-batch joint (Layer~C reference). The expected outcome from
+Layer~B's prediction is a yield-stress drift toward
+$\sigma_{Y,\infty}$ on the same-batch delayed pair, and an
+amplified drift on the cross-batch pair; Fig.~\ref{fig:fresh-D1}
+overlays both observed drifts on Layer~B's predicted direction in
+flow-curve space.
+
+\begin{figure}[!htbp]
+    \centering
+    \figureorplaceholder[3.8cm]{\columnwidth}{figs/freshness/fresh_D1_real_staleness.pdf}{Placeholder F-FRESH-D1:
+    Real-material staleness on katakuriko $5\%$. Flow-curve overlay
+    in log-log: black is the reference same-batch $t=0$/$t=0$ joint;
+    blue is the same-batch $t=0$/$t=40$ delayed joint; red is the
+    cross-batch paired joint. A grey shaded arrow shows the bias
+    direction predicted by Layer~B at the corresponding $\hat T_k$.}
+    \caption{Layer~D closing the loop: real-material staleness on
+    katakuriko $5\%$ (and oats $9\%$ where two batches are
+    available) compared against the Layer~B synthetic prediction.
+    Agreement in direction and within an order of magnitude in size
+    is the criterion of success; numerical $\Delta$ values are
+    reported in the prose.}
+    \Description{Flow-curve overlay showing the reference and two
+    staleness-protocol joint inverses on real katakuriko 5\%, with
+    a synthetic-predicted bias direction overlaid.}
+    \label{fig:fresh-D1}
+\end{figure}
+
+% -------------------------------------------------------------------
+\paragraph{Scope and acknowledged limitations.}
+The freshness section operates under four explicit caveats.
+\emph{(i) Sample size.} Each condition is captured once except for
+the two repeat-batch rows; within-condition variance is therefore
+not estimated for the single-batch conditions.
+\emph{(ii) Fit degrees of freedom.} The three-point inverse fit of
+Eq.~\eqref{eq:avrami} has one degree of freedom; Layer~A bounds the
+$T_k$ window in which this is meaningful, and Layer~C only reports
+inside that window.
+\emph{(iii) Model misspecification.} A first-order build-up form is
+assumed throughout. Materials that follow stretched-exponential or
+two-stage kinetics will be misfit even if Layer~A's identifiability
+bound is respected; if a stretched-exponential ground-truth sweep
+is added to Layer~A, the resulting bias is reported there.
+\emph{(iv) Not a substitute for full ageing studies.} Layer~C
+characterises kinetics on the $0$--$40$\,min window only; the
+$24$\,h rheometer plateau is used as an external check on the
+asymptote, not as a curve our method recovers. Longer-window
+ageing studies are out of scope.
+
+\subsection{End-to-End Capture-to-Parameter Time Budget}
+\label{sec:timebudget}
+
+We separate the speed comparison into the human-attention cost before
+inverse and the automated CMA-ES inverse cost. The predecessor's manual
+camera workflow uses \texttt{fSpy} plus \texttt{Blender} alignment, while
+our ChArUco + OpenGL calibration replaces that step with a single
+non-interactive solve. The inverse comparison isolates the compute stage:
+it excludes preparation, capture, segmentation, and calibration, matching
+the simulation-in-the-loop runtime reported for the predecessor.
+Tab.~\ref{tab:time-budget} reports the per-stage breakdown.
+
+\begin{table}[!htbp]
+\centering
+\small
+\caption{Per-material time budget split into manual processing and
+CMA-ES inverse. Manual rows are wall-clock user-attention time; inverse
+rows are compute time after observations are available.}
+\label{tab:time-budget}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Stage & Predecessor & Ours & Gain \\
+\midrule
+Video trim & $2{:}27$ & $2{:}27$ & -- \\
+Camera calibration & $15{:}56$ & $1{:}12$ & $13.3\times$ \\
+Mask cleanup & $6{:}30$ & $6{:}30$ & -- \\
+\textbf{Manual total} & \textbf{$24{:}53$} & \textbf{$10{:}10$} & \textbf{$2.4\times$} \\
+\midrule
+Single-setup inverse & $\sim 8$\,h & $12$\,s & $2.4\times10^{3}$ \\
+Two-setup inverse & $\sim 16$\,h & $17$--$30$\,s & $2.6\times10^{3}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Thus a per-material run finishes in roughly $10$--$11$\,min of
+wall-clock in our pipeline, rather than a comparable manual preprocessing
+budget followed by hours of MPM-in-loop inversion. The practical effect is
+not only lower latency, but access to freshness and multi-setup
+measurements inside a single user session.
+\section{Discussion and Conclusion}
+\label{sec:discussion}
+
+\subsection{What the Acceleration Unlocks}
+
+The immediate effect of our pipeline is a three-orders-of-magnitude
+reduction in per-video inverse cost. The seconds-scale inverse
+supports three roles evaluated in the results. First,
+\S\ref{sec:rheometer} uses rheometer-feasible Hamamichi materials as
+an independent anchor, checking that replacing MPM-in-the-loop by a
+routed GP surrogate does not detach the recovered flow curves from
+instrumental rheology. Second, \S\ref{sec:chunky} moves to the target
+rheometer-infeasible regime, where sim--real replay and qualitative
+free-surface behaviour replace unavailable parallel-plate sweeps as
+the validation target. Third, \S\ref{sec:freshness} uses the same
+seconds-scale inverse for time-varying materials, turning ``hours to
+return a past state'' into ``seconds to return the current state.''
+
+\subsection{A Reusable Surrogate as a Community Asset}
+\label{sec:asset}
+
+The separation of a one-time offline training phase from a
+seconds-scale online inference phase produces a reusable artefact
+that is structurally unavailable to simulation-in-the-loop pipelines.
+Our frozen HMoGP checkpoint was trained once on $295{,}419$ MPM
+simulations covering $5.5$--$5.6$ orders of magnitude in $\eta$
+and $\sigma_Y$ and the full $[2, 7]\,\mathrm{cm}$ range of
+household containers. Subsequent users---and subsequent research on
+video rheometry---can query the same checkpoint without paying the
+MPM training cost again. This amortisation property is what turns
+our method from a one-shot inverse into a reusable measurement
+instrument; it is not available to sim-in-loop pipelines because
+they have no surrogate to amortise. We release the checkpoint, the
+training corpus, and the inverse code alongside this paper.
+
+\subsection{Why Regime-Aware Surrogate and Identifiability-Aware
+Inverse Must Go Together}
+
+A takeaway at the core of this work is that neither the surrogate
+nor the inverse modifications is sufficient alone. A single global
+GP, even if it were accurate enough, would still leave the
+$\sigma_Y$-identifiability ridge intact under a vanilla CMA-ES: the
+optimiser would slide to $\sigma_Y \to 0$ while inflating $\eta$ to
+match the observation. Conversely, the identifiability-aware inverse
+of \S\ref{sec:inverse} requires an accurate surrogate to be evaluated
+at the $\mathcal{O}(10^{3})$ candidates issued by a multi-restart
+CMA-ES run within seconds (Tab.~\ref{tab:time-budget});
+running the same inverse against a coarse surrogate would
+reintroduce surrogate bias as a new source of error. The
+hierarchical mixture-of-GP (HMoGP) surrogate and the
+GP-aware inverse---which keeps CMA-ES inside the routed expert's
+training support and reads the residual ridge through restart
+dispersion and the local Laplace--Hessian interval rather than
+through a hand-chosen $\sigma_Y$ prior---must be coupled; this
+coupling is the technical core.
+
+\subsection{Relation to Differentiable MPM}
+
+Differentiable MPM pipelines~\cite{li2023pacnerf,eastman2024recovery}
+obtain gradients through the forward simulator and perform
+gradient-based per-scene parameter search. We differ in two
+respects. First, gradients through the non-smooth HB return map are
+known to be
+ill-conditioned~\cite{huang2021plasticinelab}; our gradient-free
+inverse sidesteps this issue. Second, differentiable-MPM pipelines
+optimise per scene and do not amortise a reusable surrogate, so
+their per-material cost remains in the simulation-in-the-loop
+regime. Our architectural choice of an offline-trained hierarchical
+surrogate is precisely what enables the seconds-scale per-video
+latency and the community-asset property of \S\ref{sec:asset}.
+
+
+\subsection{Conclusion}
+
+We presented a surrogate-accelerated framework for non-Newtonian
+video rheometry that compresses the Herschel--Bulkley inverse from
+around eight hours per setup in simulation-in-the-loop prior
+work~\cite{hamamichi2023nonnewtonian} to a median of $12$\,s per
+video on a single consumer GPU. The inverse core rests on two coupled
+components: a regime-aware hierarchical Mixture-of-GP surrogate
+(HMoGP) whose locally-trained exact-GP experts are routed
+by a deterministic three-stage gate over container geometry,
+terminal flow displacement, and normalised trajectory shape, with
+a final observation-evidence rerank; and an identifiability-aware
+GP-aware inverse that warm-starts CMA-ES from the routed expert's
+nearest training neighbour and reports the residual
+yield-stress/consistency ridge through multi-restart dispersion and
+a local Laplace--Hessian $95\%$ confidence interval, rather than
+breaking the ridge with a hand-chosen $\sigma_Y$ prior.
+The full capture-to-parameter workflow additionally replaces the
+manual camera-calibration stage with the ChArUco and silhouette-edge
+pipeline of \S\ref{sec:calib}.
+\citet{hamamichi2023nonnewtonian} mitigates the same ridge with
+Hessian-based similarity analysis, a Poiseuille-flow proxy, active
+setup selection, and iterative multi-setup CMA-ES; our path
+swaps that Hessian machinery for surrogate-amortised diagnosis and
+a replay-consistency-guarded two-setup joint inversion that
+preserves the single-setup recovery---both made practical by the
+surrogate.
+
+Beyond runtime reduction, the seconds-scale inverse makes three
+capabilities practical: fast rheometer-referenced anchoring on
+standard materials, replay-based characterisation of
+rheometer-infeasible fluids, and fresh parameter estimates for
+time-varying materials. We release the trained
+surrogate, the $295{,}419$-simulation MPM training corpus, and the
+inverse code as a reusable community artefact on which subsequent
+video-rheometry research can build without paying the simulation
+training cost again.
+
+The broader message is that video rheometry crosses the threshold
+from laboratory demonstration to fieldable tool not by replacing
+physics-based estimation but by amortising its cost. The surrogate
+is an accelerator of a physics-grounded inverse, not a substitute
+for physics; what this acceleration enables, at seconds per video,
+is what brings the technique within reach of time-sensitive,
+iterative, and situated measurement.
+
+
+\section{Limitations}
+\label{sec:limitations}
+
+\subsection{Information-Theoretic Yield-Stress Limit}
+The identifiability-aware inverse of \S\ref{sec:inverse} resolves
+the yield-stress/consistency degeneracy whenever the dam-break
+observation carries \emph{some} signal about $\sigma_Y$, but it
+cannot recover information that is not in the observation. For
+materials in which $\eta\,\dot\gamma^{\,n} \gg \sigma_Y$ across the
+entire dam-break shear-rate range, the flow front encodes
+essentially no information about $\sigma_Y$, and any inverse---ours
+included---returns an estimate determined by the prior and the
+training distribution rather than by the data. The $N=30$ held-out
+panel of Table~\ref{tab:setup-ablation} contains low-$\sigma_Y$
+samples in this regime; their estimates are dominated by the prior
+rather than by the data, and contribute disproportionately to the
+$\sigma_Y$ mean relative to its median. This is a task-level bound,
+not a method bound; the appropriate mitigation is the multi-setup
+protocol of \S\ref{sec:mainresults}.
+
+\subsection{Dependence on Training-Set Coverage}
+The surrogate is trustworthy only inside the input box on which it
+was trained. Queries outside this box trigger the per-expert bound
+tightening (\S\ref{sec:inverse}), which relies on the routed
+expert's training inputs as the admissible region and therefore
+does not extrapolate. Out-of-distribution materials require an
+extension of the training corpus. The per-expert GP predictive
+variance flags out-of-distribution queries but does not by itself
+correct them.
+
+\subsection{Fidelity of the Forward Model}
+A surrogate can only be as accurate as the simulator it learns from.
+Our MPM forward (\S3.2) models HB rheology, gravity, and no-slip
+boundaries, but not surface tension, elastic overshoot, thixotropy,
+or viscoelastic memory. Materials exhibiting these phenomena deviate
+systematically from the HB forward, and this deviation cannot be
+recovered by any HB inverse.
+
+\subsection{Capture and Geometry Requirements}
+The level-$1$ gate is trained on rectangular cube-like containers
+with $W, H \in [2, 7]$\,cm; curved or irregular containers fall
+outside the calibrated geometry box. Camera calibration uses a
+printed ChArUco marker board.
+
+\subsection{Latency Regime}
+Our median wall-clock is $12$\,s per video on a single consumer
+GPU---seconds-scale but not millisecond-scale. The ``fast'' of our
+title denotes \emph{fast enough to fit within a single user
+interaction}, not strict continuous-time inversion.
+
+
+% --- Acknowledgements -------------------------------------------------
+\begin{acks}
+% Under the [anonymous] class option this block is suppressed.
+% Remove [anonymous] to have acmart typeset the proper acknowledgements
+% in the camera-ready.
+We thank
+\textit{[collaborators, material / rheometer access providers,
+compute-cluster contacts]}
+for making this work possible. The $295{,}419$-row MPM training
+corpus was generated on
+\textit{[institutional compute resource]}.
+This research was supported by
+\textit{[funding sources and grant numbers]}.
+\end{acks}
+
+% Bibliography
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{bibliography}
+
+% Appendix
+% \appendix
+

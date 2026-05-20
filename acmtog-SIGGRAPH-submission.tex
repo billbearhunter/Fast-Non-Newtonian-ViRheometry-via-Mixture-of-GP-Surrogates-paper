@@ -1,0 +1,284 @@
+\documentclass[acmtog,anonymous,review]{acmart}
+% \documentclass[acmtog,review]{acmart}
+\acmSubmissionID{1234}
+
+\usepackage{booktabs} % For formal tables
+
+% TOG prefers author-name bib system with square brackets
+\citestyle{acmauthoryear}
+%\setcitestyle{nosort,square} % nosort to allow for manual chronological ordering
+
+
+
+\usepackage[ruled]{algorithm2e} % For algorithms
+\renewcommand{\algorithmcfname}{ALGORITHM}
+\SetAlFnt{\small}
+\SetAlCapFnt{\small}
+\SetAlCapNameFnt{\small}
+\SetAlCapHSkip{0pt}
+
+% --- Float placement relief ------------------------------------------------
+% [t]-only placement caused a large backlog of figures/tables/algorithms to
+% queue past LaTeX's \topnumber / \totalnumber limits, dumping onto the
+% final pages as a "float-only" block and producing trailing blank pages.
+% Wide float-heavy sections (especially figure*) need enough placement
+% freedom in ACM's two-column layout; otherwise LaTeX queues them and
+% leaves sparse text pages while waiting for a legal top-of-page slot.
+\usepackage{placeins} % provides \FloatBarrier; [section] option is
+                      % forbidden by acmart (redefines \section).
+\renewcommand{\topfraction}{0.95}
+\renewcommand{\bottomfraction}{0.8}
+\renewcommand{\textfraction}{0.05}
+\renewcommand{\floatpagefraction}{0.6}
+\renewcommand{\dbltopfraction}{0.95}
+\renewcommand{\dblfloatpagefraction}{0.6}
+\setcounter{topnumber}{4}
+\setcounter{bottomnumber}{2}
+\setcounter{totalnumber}{6}
+\setcounter{dbltopnumber}{3}
+\setlength{\floatsep}{6pt plus 2pt minus 2pt}
+\setlength{\textfloatsep}{8pt plus 2pt minus 2pt}
+\setlength{\dblfloatsep}{6pt plus 2pt minus 2pt}
+\setlength{\dbltextfloatsep}{8pt plus 2pt minus 2pt}
+
+% --- Tagged equation environment (fix hyperref duplicate destinations) -----
+% amsmath's \tag{...} replaces the visible equation number but rolls the
+% equation counter back at \end{equation}, so multiple \tag-labelled
+% equations all end up placing their hyperref anchor at the SAME
+% counter value (e.g. equation.24), triggering pdfTeX's "destination
+% with the same identifier has been already used, duplicate ignored"
+% warnings and breaking \ref navigation to the later tagged eqs.
+%
+% Workaround: use equation* (unnumbered, no counter anchor) and manually
+% set \@currentlabel so \ref prints the custom tag. \phantomsection
+% creates a unique hyperref destination right before the equation so
+% each \label binds to its own fresh anchor. Usage:
+%     \begin{taggedeqn}{P}{P}
+%         \hat{\boldsymbol{\theta}} = \arg\min ...
+%     \end{taggedeqn}
+% First arg is the visible tag text, second is the slug for eq:<slug>.
+\makeatletter
+\newenvironment{taggedeqn}[2]{%
+    \gdef\@currentlabel{#1}%
+    \phantomsection\label{eq:#2}%
+    \begin{equation*}\tag*{(#1)}%
+}{%
+    \end{equation*}%
+}
+\makeatother
+
+% --- Typography relief -----------------------------------------------------
+% Let TeX stretch inter-word spacing by up to 3em on tight paragraphs before
+% declaring an overfull hbox. This absorbs most small-to-medium overflows
+% from long inline math, \texttt{long/file/paths.py}, and multi-line
+% compound adjectives without manual line-break hints. Tune down if the
+% inter-word spacing becomes visually uneven.
+\emergencystretch=3em
+\hbadness=2000   % mute "Underfull \hbox" complaints below this badness
+\hfuzz=1pt       % tolerate up to 1pt overfull without reporting
+
+% --- Figure placeholder mode ---------------------------------------------
+% When \figplaceholdertrue is set, draft-only figures render as framed
+% placeholder boxes. The normal submission path is \figplaceholderfalse:
+% \figureorplaceholder / \widefigureorplaceholder render the image when
+% the file exists and fall back to the same box only when the file is
+% still absent.
+\newif\iffigplaceholder
+\figplaceholderfalse
+
+\newcommand{\figplaceholder}[2][6cm]{%
+    \fbox{\parbox[c][#1][c]{0.94\columnwidth}{%
+        \centering\small\itshape #2}}%
+}
+\newcommand{\figplaceholderwide}[2][6cm]{%
+    \fbox{\parbox[c][#1][c]{0.97\textwidth}{%
+        \centering\small\itshape #2}}%
+}
+\newcommand{\figureorplaceholder}[4][6cm]{%
+    \iffigplaceholder
+        \figplaceholder[#1]{#4}%
+    \else
+        \IfFileExists{#3}{\includegraphics[width=#2]{#3}}{%
+            \figplaceholder[#1]{#4}}%
+    \fi
+}
+\newcommand{\widefigureorplaceholder}[4][6cm]{%
+    \iffigplaceholder
+        \figplaceholderwide[#1]{#4}%
+    \else
+        \IfFileExists{#3}{\includegraphics[width=#2]{#3}}{%
+            \figplaceholderwide[#1]{#4}}%
+    \fi
+}
+
+% Metadata Information
+\acmJournal{TOG}
+%\acmVolume{38}
+%\acmNumber{4}
+%\acmArticle{39}
+%\acmYear{2019}
+%\acmMonth{7}
+
+% Copyright
+%\setcopyright{acmcopyright}
+%\setcopyright{acmlicensed}
+%\setcopyright{rightsretained}
+%\setcopyright{usgov}
+%\setcopyright{usgovmixed}
+%\setcopyright{cagov}
+%\setcopyright{cagovmixed}
+
+% DOI
+%\acmDOI{0000001.0000001_2}
+
+% Paper history
+%\received{February 2007}
+%\received{March 2009}
+%\received[final version]{June 2009}
+%\received[accepted]{July 2009}
+
+
+% Document starts
+\begin{document}
+% Title portion
+\title{Fast Non-Newtonian ViRheometry via Mixture-of-GP Surrogates}
+
+% Authors (suppressed automatically by acmart [anonymous] flag during
+% review; will render in the camera-ready when the [anonymous] option
+% is removed from \documentclass).
+\author{Yuxiang Xiong}
+\email{billxiong021@gmail.com}
+\affiliation{%
+  \institution{Aoyama Gakuin University (AGU)}
+  \country{Japan}
+}
+\author{Mitsuki Hamamichi}
+\email{hammik.1231@gmail.com}
+\affiliation{%
+  \institution{Aoyama Gakuin University (AGU)}
+  \country{Japan}
+}
+\author{Yonghao Yue}
+\email{yonghao@it.aoyama.ac.jp}
+\affiliation{%
+  \institution{Aoyama Gakuin University (AGU)}
+  \streetaddress{O-525, Fuchinobe 5-10-1, Chuo-ku}
+  \city{Sagamihara}
+  \state{Kanagawa}
+  \postcode{252-5258}
+  \country{Japan}
+}
+
+\renewcommand\shortauthors{Xiong, Y. et al.}
+
+\begin{abstract}
+We estimate the three Herschel--Bulkley parameters
+(yield stress $\sigma_Y$, power-law index $n$, consistency parameter
+$\eta$) of complex fluids---pastes, chunky sauces, granular
+slurries---for which conventional rheometers cannot provide useful
+measurements, by matching dam-break video footage against
+physics-based simulation, following the protocol
+of~\cite{hamamichi2023nonnewtonian}. The inverse is accurate but
+slow: each estimation requires hundreds of in-loop
+material-point-method evaluations and therefore takes around eight
+hours of GPU time per setup, so the method serves as a research
+tool rather than a routine measurement.
+
+We compress this inverse from around eight hours to under a minute
+per setup by replacing the in-loop simulator with a mixture of
+Gaussian-process experts fitted to a corpus of MPM dam-break
+simulations. We further replace the manual camera-calibration
+workflow that precedes the inverse with an algorithmic two-stage
+pipeline based on ChArUco markers and silhouette-edge refinement.
+
+We validate our method against the predecessor's simulation-in-the-loop
+benchmark and against parallel-plate rheometer measurements on real
+materials the rheometers can handle. The surrogate inverse preserves
+dam-break replay and flow-curve agreement in the regimes supported by
+the observation, while running at three orders of magnitude lower
+latency. The seconds-scale
+inversion enables two uses inaccessible at hours-per-setup cost:
+\emph{(i)}~\emph{fresh parameters for time-varying fluids}, in which
+the inversion returns the material's current state rather than a
+stale snapshot from hours earlier; and
+\emph{(ii)}~\emph{practical real-fluid validation and
+characterisation}, in which rheometer-referenced anchors,
+rheometer-infeasible material panels, and multi-setup sessions fit
+inside a single user interaction rather than an offline showcase.
+\end{abstract}
+
+
+%
+% The code below should be generated by the tool at
+% http://dl.acm.org/ccs.cfm
+% Please copy and paste the code instead of the example below.
+%
+
+\begin{CCSXML}
+<ccs2012>
+ <concept>
+  <concept_id>10010147.10010371.10010396.10010398</concept_id>
+  <concept_desc>Computing methodologies~Physical simulation</concept_desc>
+  <concept_significance>500</concept_significance>
+ </concept>
+ <concept>
+  <concept_id>10010147.10010257.10010293</concept_id>
+  <concept_desc>Computing methodologies~Computer graphics</concept_desc>
+  <concept_significance>300</concept_significance>
+ </concept>
+ <concept>
+  <concept_id>10010147.10010178.10010224</concept_id>
+  <concept_desc>Computing methodologies~Machine learning</concept_desc>
+  <concept_significance>300</concept_significance>
+ </concept>
+</ccs2012>
+\end{CCSXML}
+
+
+% \begin{CCSXML}
+% <ccs2012>
+%  <concept>
+%   <concept_id>10010520.10010553.10010562</concept_id>
+%   <concept_desc>Computer systems organization~Embedded systems</concept_desc>
+%   <concept_significance>500</concept_significance>
+%  </concept>
+%  <concept>
+%   <concept_id>10010520.10010575.10010755</concept_id>
+%   <concept_desc>Computer systems organization~Redundancy</concept_desc>
+%   <concept_significance>300</concept_significance>
+%  </concept>
+%  <concept>
+%   <concept_id>10010520.10010553.10010554</concept_id>
+%   <concept_desc>Computer systems organization~Robotics</concept_desc>
+%   <concept_significance>100</concept_significance>
+%  </concept>
+%  <concept>
+%   <concept_id>10003033.10003083.10003095</concept_id>
+%   <concept_desc>Networks~Network reliability</concept_desc>
+%   <concept_significance>100</concept_significance>
+%  </concept>
+% </ccs2012>
+% \end{CCSXML}
+
+\ccsdesc[500]{Computing methodologies~Physical simulation}
+\ccsdesc[300]{Computing methodologies~Computer graphics}
+\ccsdesc[300]{Computing methodologies~Machine learning}
+
+%
+% End generated code
+%
+
+
+\keywords{Material parameter estimation, Herschel--Bulkley,
+non-Newtonian fluids, video-based estimation,
+surrogate-accelerated inverse, camera calibration}
+
+
+% Teaser omitted in this draft to avoid duplicating the method overview.
+
+\maketitle
+
+\input{body-journals}
+
+
+\end{document}
